@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import type { RawActionInputs } from './types';
 
-const DEFAULT_PI_VERSION = '0.82.1';
+const DEFAULT_PI_VERSION = '0.87.1';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
 
@@ -44,7 +44,7 @@ export function getRawInputs(): RawActionInputs {
   const piVersion = optionalInput('pi-version') ?? DEFAULT_PI_VERSION;
   if (!VERSION_PATTERN.test(piVersion)) {
     throw new Error(
-      `Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 0.82.1, latest).`,
+      `Invalid pi-version '${piVersion}'. Must be a version or dist-tag (agent mode requires 0.87.1).`,
     );
   }
 

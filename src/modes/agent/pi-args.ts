@@ -28,7 +28,7 @@ const PI_FLAGS = [
 ] as const;
 
 /** Map the action's api-type to a pi provider id. */
-export function providerFor(inputs: ActionInputs): string {
+export function providerFor(inputs: Pick<ActionInputs, 'apiType'>): string {
   switch (inputs.apiType) {
     case 'anthropic':
       return 'anthropic';
@@ -48,7 +48,9 @@ export function providerFor(inputs: ActionInputs): string {
  * referenced via env interpolation ($CUSTOM_API_KEY) so it never
  * appears in argv or on disk in plaintext beyond the process env.
  */
-export function buildModelsJson(inputs: ActionInputs): Record<string, unknown> {
+export function buildModelsJson(
+  inputs: Pick<ActionInputs, 'apiType' | 'baseUrl' | 'model'>,
+): Record<string, unknown> {
   if (inputs.apiType !== 'openai-chat-compatible') {
     throw new Error('buildModelsJson is only for openai-chat-compatible.');
   }

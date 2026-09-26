@@ -62,11 +62,11 @@ inputs:
     required: false
     default: '200'
   pi-version:
-    description: 'Version of @earendil-works/pi-coding-agent to install for agent mode (e.g. 0.82.1, latest).'
+    description: 'Pinned pi SDK version for agent mode. Currently only 0.87.1 is supported.'
     required: false
-    default: '0.82.1'
+    default: '0.87.1'
   pi-timeout-ms:
-    description: 'Hard timeout in milliseconds for a pi-engine review run. Guards against runaway loops since pi has no built-in step cap.'
+    description: 'Timeout in milliseconds for an SDK agent review. Requests cancellation on expiry; set a workflow job timeout as a hard limit.'
     required: false
     default: '600000'
 

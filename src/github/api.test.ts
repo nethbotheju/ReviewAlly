@@ -1,6 +1,39 @@
 import { describe, it, expect, vi, type Mock } from 'vitest';
-import { fetchFileContents, postReview, reactToComment, type OctokitLike } from './api';
+import {
+  fetchChangedFiles,
+  fetchFileContents,
+  postReview,
+  reactToComment,
+  type OctokitLike,
+} from './api';
 import type { ReviewComment } from '../shared/types';
+
+// --- fetchChangedFiles ---
+
+describe('fetchChangedFiles', () => {
+  it('marks a patch incomplete when GitHub omits added lines', async () => {
+    const octokit = {
+      paginate: vi.fn().mockResolvedValue([
+        {
+          filename: 'src/a.ts',
+          status: 'modified',
+          additions: 3,
+          deletions: 0,
+          patch: '@@ -0,0 +1,3 @@\n+only one line',
+        },
+      ]),
+      rest: { pulls: { listFiles: vi.fn() } },
+    } as unknown as OctokitLike;
+    const result = await fetchChangedFiles(octokit, 'o', 'r', 1, {
+      maxFiles: 10,
+      maxDiffLines: 100,
+      useDefaultExcludes: false,
+      excludePatterns: [],
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.truncatedReason).toContain('incomplete file patch');
+  });
+});
 
 // --- fetchFileContents ---
 

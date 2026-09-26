@@ -11,19 +11,21 @@ import {
   postReview,
   reactToComment,
 } from './github/api';
-import { buildAgentSystemPrompt, buildSystemPrompt, buildUserPrompt } from './shared/prompt';
+import { buildSystemPrompt, buildUserPrompt } from './shared/prompt';
 import { parseReview } from './shared/parse';
 import { formatNoChanges, formatRepairWarning, formatReview } from './shared/format';
 import { runStandardReview } from './modes/standard/runner';
 import { createModel } from './modes/standard/models';
-import { runAgentReview } from './modes/agent/runner';
+import { runSdkInvestigation } from './modes/agent/sdk-review';
+import { publishAgentReview } from './modes/agent/post';
+import { PI_SDK_VERSION } from './modes/agent/sdk-install';
 import {
   prepareRepoSnapshot,
   buildRepoTree,
   cleanupRepoSnapshot,
   RepoTooLargeError,
 } from './modes/agent/snapshot';
-import type { ActionInputs, RepoRoot } from './config/types';
+import type { RepoRoot } from './config/types';
 
 async function run(): Promise<void> {
   let repoRoot: RepoRoot | undefined;
@@ -33,6 +35,7 @@ async function run(): Promise<void> {
   try {
     const raw = getRawInputs();
     core.setSecret(raw.apiKey);
+    core.setSecret(raw.githubToken);
 
     const config = resolveInputs(raw, repoVariablesFromEnv());
     const inputs = config.inputs;
@@ -122,30 +125,46 @@ async function run(): Promise<void> {
       }
     }
 
-    // Build prompts
-    const tree = useAgent && repoRoot ? buildRepoTree(repoRoot.path, inputs) : undefined;
-    const promptInputs: ActionInputs = useAgent ? inputs : { ...inputs, reviewMode: 'standard' };
-    const systemPrompt = useAgent
-      ? buildAgentSystemPrompt(promptInputs)
-      : buildSystemPrompt(promptInputs);
-    const userPrompt = buildUserPrompt(
-      pr,
-      fetchResult.files,
-      { docs: contextDocs, tree },
-      useAgent,
-    );
+    if (useAgent && repoRoot) {
+      if (inputs.piVersion !== PI_SDK_VERSION) {
+        throw new Error(
+          `Agent mode requires the pinned pi SDK ${PI_SDK_VERSION}; received pi-version=${inputs.piVersion}.`,
+        );
+      }
+      const beforeReview = await fetchPullRequest(octokit, owner, repo, pullNumber);
+      if (beforeReview.headSha !== pr.headSha) {
+        throw new Error(
+          'PR head changed while preparing the agent snapshot. Run the review again.',
+        );
+      }
+      const investigation = await runSdkInvestigation(pr, fetchResult, repoRoot, inputs, {
+        docs: contextDocs,
+        tree: buildRepoTree(repoRoot.path, inputs),
+        traceSecrets: [inputs.githubToken, githubToken],
+      });
+      const validated = await publishAgentReview(
+        octokit,
+        owner,
+        repo,
+        pr,
+        fetchResult,
+        repoRoot,
+        investigation,
+      );
+      core.setOutput('summary', investigation.assessment!.summary);
+      core.info(`Posted agent review with ${validated.comments.length} inline finding(s).`);
+      if (commentId) await reactToComment(octokit, owner, repo, commentId, '+1');
+      return;
+    }
 
-    // Run review
-    const reviewResult =
-      useAgent && repoRoot
-        ? await runAgentReview(systemPrompt, userPrompt, repoRoot, inputs)
-        : await runStandardReview(createModel(inputs), systemPrompt, userPrompt);
+    const systemPrompt = buildSystemPrompt(inputs);
+    const userPrompt = buildUserPrompt(pr, fetchResult.files, { docs: contextDocs });
+    const reviewResult = await runStandardReview(createModel(inputs), systemPrompt, userPrompt);
 
     core.info(
       `Review done. tokens in=${reviewResult.inputTokens} out=${reviewResult.outputTokens} tot=${reviewResult.totalTokens} steps=${reviewResult.steps}`,
     );
 
-    // Parse, format, post
     modelResponse = reviewResult.text;
     const doc = parseReview(reviewResult.text, {
       onRepair: () => {

@@ -8,6 +8,8 @@ import { isExcluded, resolveExcludes } from '../../shared/util';
 import type { ActionInputs, RepoRoot } from '../../config/types';
 
 const MAX_TREE_ENTRIES = 200;
+const MAX_ARCHIVE_ENTRIES = 100_000;
+const MB = 1024 * 1024;
 
 /** Error thrown when the repo tarball exceeds the configured max size. */
 export class RepoTooLargeError extends Error {
@@ -34,8 +36,8 @@ export async function prepareRepoSnapshot(
 
   const { buffer, contentLengthMb } = await downloadTarball(octokit, owner, repo, ref);
 
-  if (contentLengthMb != null && contentLengthMb > maxMb) {
-    throw new RepoTooLargeError(Math.round(contentLengthMb * 10) / 10, maxMb);
+  if ((contentLengthMb != null && contentLengthMb > maxMb) || buffer.length > maxMb * MB) {
+    throw new RepoTooLargeError(Math.round((buffer.length / MB) * 10) / 10, maxMb);
   }
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reviewally-'));
@@ -45,7 +47,38 @@ export async function prepareRepoSnapshot(
 
     const extractDir = path.join(workDir, 'extracted');
     fs.mkdirSync(extractDir, { recursive: true });
-    await tarExtract({ file: tarballPath, C: extractDir });
+    let archiveEntries = 0;
+    let expandedBytes = 0;
+    let violation: Error | undefined;
+    await tarExtract({
+      file: tarballPath,
+      C: extractDir,
+      filter: (entryPath, entry) => {
+        if (violation) return false;
+        if (
+          path.isAbsolute(entryPath) ||
+          path.win32.isAbsolute(entryPath) ||
+          entryPath.split(/[\\/]/).includes('..')
+        ) {
+          violation = new Error('Repository snapshot contains an unsafe archive path.');
+          return false;
+        }
+        if ('type' in entry) {
+          if (entry.type === 'SymbolicLink' || entry.type === 'Link') return false;
+          if (entry.type !== 'File' && entry.type !== 'Directory') return false;
+        } else if (!entry.isFile() && !entry.isDirectory()) {
+          return false;
+        }
+        archiveEntries++;
+        expandedBytes += entry.size;
+        if (archiveEntries > MAX_ARCHIVE_ENTRIES || expandedBytes > maxMb * MB * 3) {
+          violation = new RepoTooLargeError(Math.round((expandedBytes / MB) * 10) / 10, maxMb);
+          return false;
+        }
+        return true;
+      },
+    });
+    if (violation) throw violation;
 
     // GitHub tarballs extract to a single top-level directory like "owner-repo-sha/".
     const entries = fs.readdirSync(extractDir).filter((e) => !e.startsWith('.'));
@@ -105,7 +138,8 @@ export function buildRepoTree(
 
       let stat: fs.Stats;
       try {
-        stat = fs.statSync(fullPath);
+        stat = fs.lstatSync(fullPath);
+        if (stat.isSymbolicLink()) continue;
       } catch {
         continue;
       }
