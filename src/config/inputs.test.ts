@@ -62,7 +62,7 @@ describe('getRawInputs', () => {
       maxDiffLines: 3000,
       useDefaultExcludes: true,
       agentTarballMaxMb: 200,
-      piVersion: '0.82.1',
+      piVersion: '0.87.1',
       piTimeoutMs: 600000,
       apiType: undefined,
       baseUrl: undefined,
@@ -101,7 +101,7 @@ describe('getRawInputs', () => {
   });
 
   it('throws on pi-version with shell metacharacters', () => {
-    setEnv({ 'INPUT_PI-VERSION': '0.82.1; rm -rf /' });
+    setEnv({ 'INPUT_PI-VERSION': '0.87.1; rm -rf /' });
     expect(() => getRawInputs()).toThrow(/Invalid pi-version/);
   });
 

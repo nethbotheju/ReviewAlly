@@ -29,7 +29,10 @@ export async function fetchChangedFiles(
   owner: string,
   repo: string,
   pullNumber: number,
-  inputs: ActionInputs,
+  inputs: Pick<
+    ActionInputs,
+    'maxFiles' | 'maxDiffLines' | 'useDefaultExcludes' | 'excludePatterns'
+  >,
 ): Promise<FetchResult> {
   const all = await octokit.paginate(octokit.rest.pulls.listFiles, {
     owner,
@@ -75,6 +78,15 @@ export async function fetchChangedFiles(
     deletions: f.deletions,
     lines: annotatePatch(f.patch as string),
   }));
+  const incompletePatch = files.some(
+    (file) => file.lines.filter((line) => line.type === 'add').length !== file.additions,
+  );
+  if (incompletePatch) {
+    truncated = true;
+    truncatedReason = [truncatedReason, 'GitHub supplied an incomplete file patch']
+      .filter(Boolean)
+      .join('; ');
+  }
 
   core.info(
     `Found ${all.length} changed file(s); ${candidates.length} reviewable; reviewing ${files.length}.`,

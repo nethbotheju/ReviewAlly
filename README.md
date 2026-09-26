@@ -92,6 +92,7 @@ jobs:
           REVIEWALLY_EXTRA_INSTRUCTIONS: ${{ vars.REVIEWALLY_EXTRA_INSTRUCTIONS }}
           REVIEWALLY_CONTEXT_DOCS: ${{ vars.REVIEWALLY_CONTEXT_DOCS }}
           REVIEWALLY_EXCLUDE_PATTERNS: ${{ vars.REVIEWALLY_EXCLUDE_PATTERNS }}
+          REVIEWALLY_AGENT_TRACE: ${{ vars.REVIEWALLY_AGENT_TRACE }}
 ```
 
 5. Open a pull request, or comment `/reviewally` on one.
@@ -106,7 +107,7 @@ One focused pass: the PR diff plus repository context (`AGENTS.md`, `CONTRIBUTIN
 
 ### Agent
 
-For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head and runs the [pi coding agent](https://github.com/earendil-works/pi) as the review harness. The model investigates with read-only tools (`read`, `grep`, `find`, `ls`) before writing a recommendation, and large repositories automatically fall back to standard mode.
+For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head and starts the [pi coding agent SDK](https://github.com/earendil-works/pi) as the review harness. The model investigates using snapshot-confined `read`, `grep`, `find`, `ls`, plus `get_diff`, `submit_finding`, and `finish_review`. ReviewAlly validates proposed findings against the changed lines and snapshot, then posts a walkthrough with replyable inline comments. No code is changed. Large repositories automatically fall back to standard mode. Agent mode requires a model that supports tool calling; a missing `finish_review` call fails the run rather than being treated as a clean review.
 
 ## Inputs
 
@@ -126,8 +127,8 @@ For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head
 | `max-diff-lines` | no | `3000` | Max total added lines reviewed per run |
 | `use-default-excludes` | no | `true` | Built-in excludes for lockfiles, minified files, sourcemaps |
 | `agent-tarball-max-mb` | no | `200` | Max repo snapshot size before degrading to standard mode |
-| `pi-version` | no | `0.82.1` | Agent runtime version |
-| `pi-timeout-ms` | no | `600000` | Hard timeout for an agent-mode review |
+| `pi-version` | no | `0.87.1` | Pinned SDK version; only `0.87.1` is currently supported in agent mode |
+| `pi-timeout-ms` | no | `600000` | SDK cancellation deadline; use a workflow job timeout for a hard kill |
 
 ¹ Or the matching `REVIEWALLY_*` repository variable — see below.
 
@@ -147,17 +148,20 @@ Resolution per setting: **workflow input > repository variable > built-in defaul
 | `REVIEWALLY_EXTRA_INSTRUCTIONS` | Extra guidance appended to the prompt |
 | `REVIEWALLY_CONTEXT_DOCS` | Comma/newline-separated doc files for project guidance |
 | `REVIEWALLY_EXCLUDE_PATTERNS` | Extra glob excludes (comma/newline separated) |
+| `REVIEWALLY_AGENT_TRACE` | `true` (default) or `false` — log the SDK transcript, tool names/arguments and results in agent mode |
+
+Existing workflows that explicitly pin `pi-version: 0.82.1` must remove that pin or update it to `0.87.1` for SDK agent mode. `REVIEWALLY_AGENT_TRACE` is environment-only (not a `with:` input) and defaults to on when unset or empty. Set the Actions repository variable to `false` and forward it via `env:` to disable it.
 
 Switching providers is a pure UI operation: update the API-key secret value, then set `REVIEWALLY_API_TYPE`, `REVIEWALLY_BASE_URL`, and `REVIEWALLY_MODEL`. Unknown `REVIEWALLY_*` variables are ignored, and if variables cannot be read the run falls back to workflow inputs. Each run's summary shows the effective value and where it came from.
 
 ## Outputs
 
-Every review covers the issue and background, the proposed solution, a summary of file changes, and prioritized recommendations. Recommendations are prioritized by impact, focusing on security, edge cases, performance, and design decisions.
+Standard reviews include the issue/background, implementation assessment, file summary, and recommendations. Agent reviews post a walkthrough with selected-file coverage, checks and limitations, plus validated inline findings. Findings include evidence and a prose suggested fix; applyable GitHub suggestion blocks and conversational replies are not yet supported.
 
 ## Security and privacy
 
-- Your API key is only used to call your provider. It is masked in logs and never sent anywhere else.
-- Standard mode never clones your repository. Agent mode downloads a snapshot to the runner's temp directory and deletes it after the review.
+- Your API key is only used to call your provider. Known API/GitHub tokens are masked in logs and never sent to agent tools. `REVIEWALLY_AGENT_TRACE` is **on by default**: Actions logs include PR prompts, model messages, tool arguments and text results (up to 64,000 characters per event and 2,000,000 per run). GitHub log viewers may see private source and PR content. Set `REVIEWALLY_AGENT_TRACE: 'false'` in the workflow environment to disable this; redaction cannot guarantee detection of unknown secrets embedded in repository files.
+- Standard mode never clones your repository. Agent mode downloads a snapshot to the runner's temp directory and deletes it after the review. Path-checked read/search tools are not an operating-system sandbox; use trusted runner isolation for sensitive repositories.
 - Review tokens are scoped to a single repository, expire in one hour, and only carry review-level permissions (`contents: read`, `pull_requests: write`, `issues: write`).
 - Reviews are always advisory — ReviewAlly never requests changes or blocks merges.
 
