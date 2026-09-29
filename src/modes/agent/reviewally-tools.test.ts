@@ -8,6 +8,7 @@ const DIFFS_FILE_ENV = 'REVIEWALLY_DIFFS_FILE';
 
 let tmpDir: string;
 let diffsFile: string;
+let oldCwd: string;
 
 interface RegisteredTool {
   name: string;
@@ -67,10 +68,17 @@ beforeEach(() => {
     JSON.stringify({ truncated: false, totalFiles: 1, reviewedFiles: 1, files: [FILE_A] }),
   );
   process.env[DIFFS_FILE_ENV] = diffsFile;
+  // The extension resolves evidence paths against the process cwd, which pi
+  // sets to the repo snapshot — emulate that with a real file on disk.
+  fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tmpDir, 'src', 'a.ts'), `${'line\n'.repeat(10)}`);
+  oldCwd = process.cwd();
+  process.chdir(tmpDir);
 });
 
 afterEach(() => {
   delete process.env[DIFFS_FILE_ENV];
+  process.chdir(oldCwd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -171,7 +179,10 @@ describe('get_diff', () => {
     await loadFreshExtension(tools);
     const getDiff = tools.find((t) => t.name === 'get_diff')!;
     await expect(run(getDiff, { path: 'nope.ts' })).rejects.toThrow(
-      /"nope\.ts" is not a changed file in this review\. Inspectable files: src\/a\.ts\./,
+      /"nope\.ts" is not among the changed files in this review.+Changed files: src\/a\.ts\./,
+    );
+    await expect(run(getDiff, { path: 'nope.ts' })).rejects.toThrow(
+      /use read\/grep on the repository snapshot/,
     );
   });
 
@@ -268,7 +279,25 @@ describe('submit_finding', () => {
     await loadFreshExtension(tools);
     const submit = tools.find((t) => t.name === 'submit_finding')!;
     await expect(run(submit, { ...FINDING, path: 'other.ts' })).rejects.toThrow(
-      /"other\.ts" is not a changed file/,
+      /"other\.ts" is not among the changed files/,
+    );
+  });
+
+  it('rejects evidence lines that are out of range, with guidance to re-submit', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    await expect(run(submit, { ...FINDING, evidenceLine: 999 })).rejects.toThrow(
+      /evidenceLine 999 is out of range for "src\/a\.ts" \(1-11\)\. Verify the exact line with read or grep, then re-submit/,
+    );
+  });
+
+  it('rejects evidence files that do not exist in the snapshot', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    await expect(run(submit, { ...FINDING, evidencePath: 'gone.ts' })).rejects.toThrow(
+      /evidence file "gone\.ts" was not found in the repository snapshot/,
     );
   });
 

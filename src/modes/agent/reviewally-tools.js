@@ -17,6 +17,8 @@ const PAGE_SIZE = 200;
 const MAX_FINDINGS = 25;
 const MAX_LINE_CHARS = 500;
 const MAX_LISTED_PATHS = 50;
+/** Mirrors the host validator: files larger than this skip the line-range check. */
+const MAX_EVIDENCE_BYTES = 5 * 1024 * 1024;
 
 let diffsCache = null;
 const findings = [];
@@ -49,6 +51,49 @@ function renderLine(l) {
   const content =
     l.content.length > MAX_LINE_CHARS ? `${l.content.slice(0, MAX_LINE_CHARS)}…` : l.content;
   return `${old} ${nw} ${mark} ${content}`;
+}
+
+/** Line count of a snapshot file, mirroring the host validator's semantics. */
+function snapshotLineCount(relPath) {
+  let stat;
+  try {
+    stat = fs.statSync(relPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile() || stat.size > MAX_EVIDENCE_BYTES) return 0;
+  const content = fs.readFileSync(relPath, 'utf8');
+  if (content.length === 0) return 0;
+  return content.split('\n').length;
+}
+
+/**
+ * Validate evidencePath/evidenceLine at call time so the model gets an
+ * actionable error and can re-submit, instead of a silent host-side rejection
+ * after the run ends.
+ */
+function validateEvidence(params) {
+  const evidencePath =
+    typeof params.evidencePath === 'string' ? params.evidencePath.trim() : '';
+  const evidenceLine = params.evidenceLine;
+  if (!evidencePath || !Number.isInteger(evidenceLine) || evidenceLine < 1) {
+    throw new Error(
+      'submit_finding requires a repository-relative evidencePath and a positive integer evidenceLine.',
+    );
+  }
+
+  const lines = snapshotLineCount(evidencePath);
+  if (lines === null) {
+    throw new Error(
+      `evidence file "${evidencePath}" was not found in the repository snapshot — check the path is repository-relative and correct (e.g. "src/lib/util.ts"), then re-submit.`,
+    );
+  }
+  if (lines > 0 && evidenceLine > lines) {
+    throw new Error(
+      `evidenceLine ${evidenceLine} is out of range for "${evidencePath}" (1-${lines}). ` +
+        'Verify the exact line with read or grep, then re-submit the finding with the corrected evidenceLine.',
+    );
+  }
 }
 
 const getDiffTool = {
@@ -86,7 +131,9 @@ const getDiffTool = {
         ? ` The file selection was truncated (${data.reviewedFiles} of ${data.totalFiles} changed files are inspectable).`
         : '';
       throw new Error(
-        `"${path}" is not a changed file in this review. Inspectable files: ${listed}${more}.${truncatedNote}`,
+        `"${path}" is not among the changed files in this review (changed, non-excluded files only). ` +
+          `Changed files: ${listed}${more}.${truncatedNote} ` +
+          'For unchanged files or broader context, use read/grep on the repository snapshot instead.',
       );
     }
 
@@ -152,11 +199,13 @@ const submitFindingTool = {
       },
       evidencePath: {
         type: 'string',
-        description: 'Repository file you inspected that supports the claim.',
+        description:
+          'Repository file you inspected that supports the claim (repository-relative, must exist in the snapshot).',
       },
       evidenceLine: {
         type: 'integer',
-        description: 'Line number in evidencePath that supports the claim.',
+        description:
+          'Line number in evidencePath that supports the claim (must be within the file — verify with read/grep before submitting).',
       },
       evidence: {
         type: 'string',
@@ -186,7 +235,10 @@ const submitFindingTool = {
     const path = typeof params.path === 'string' ? params.path.trim() : '';
     const file = findFile(path);
     if (!file) {
-      throw new Error(`"${path}" is not a changed file in this review. Use get_diff to list files.`);
+      throw new Error(
+        `"${path}" is not among the changed files in this review — findings must anchor to a changed file. ` +
+          'Call get_diff for the file to confirm the exact path and added-line numbers, then re-submit.',
+      );
     }
 
     const line = params.line;
@@ -197,9 +249,12 @@ const submitFindingTool = {
     const anchor = (file.lines || []).find((l) => l.type === 'add' && l.newLine === line);
     if (!anchor) {
       throw new Error(
-        `Line ${line} of "${path}" is not an added line in this PR — findings must anchor to added ("+") lines. Inspect the patch with get_diff.`,
+        `Line ${line} of "${path}" is not an added line in this PR — findings must anchor to added ("+") lines. ` +
+          `Call get_diff for "${path}", pick the new-file line number of a "+" line, and re-submit.`,
       );
     }
+
+    validateEvidence(params);
 
     const key = `${path}:${line}`;
     if (findingKeys.has(key)) {

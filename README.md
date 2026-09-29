@@ -128,8 +128,8 @@ After the run, ReviewAlly re-validates every candidate against the PR patches an
 | `trigger-label` | no | `reviewally` | Label that triggers a review |
 | `auto-review` | no | `false` | Also review on PR open/reopen/push |
 | `review-mode` | no | `standard` | `standard` (single prompt) or `agent` (investigation loop) |
-| `max-files` | no | `20` | Max changed files reviewed per run |
-| `max-diff-lines` | no | `3000` | Max total added lines reviewed per run |
+| `max-files` | no | `20` | Max changed files reviewed per run (standard mode; agent reviews all) |
+| `max-diff-lines` | no | `3000` | Max total added lines reviewed per run (standard mode only) |
 | `use-default-excludes` | no | `true` | Built-in excludes for lockfiles, minified files, sourcemaps |
 | `agent-tarball-max-mb` | no | `200` | Max repo snapshot size before degrading to standard mode |
 | `pi-version` | no | `0.82.1` | Agent runtime version |

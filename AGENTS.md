@@ -151,6 +151,7 @@ git push origin v1 --force
 - Test files import `../config/types` and `../shared/types` separately — ActionInputs are in config, domain types in shared.
 - The model factory in `src/modes/standard/models.ts` conditionally includes `baseURL` only when provided — do NOT pass it unconditionally for `openai`/`anthropic` types (SDK auto-injects the default).
 - `dist/` MUST be committed — GitHub Actions runs the compiled bundle, not TypeScript source.
+- Agent mode selects EVERY changed, non-excluded file for inspection — `max-files`/`max-diff-lines` apply only to standard mode (the agent reads diffs on demand via `get_diff`, never the prompt). If a too-large tarball degrades the run to standard mode, `applyDiffBudget` re-applies the caps in `index.ts`.
 - The pi engine is NOT bundled — it's installed at runtime via `npm install` on the runner (`agent/engine/install.ts`). The `dist/index.js` bundle stays ~4MB; pi's ~170MB of deps live in the install dir.
 - `pi-thinking` matters for compatible endpoints: the models.json compat shim sends `reasoning_effort` ONLY when a level above `off` is set (with `reasoning: true` + a thinkingLevelMap). With `off` — or a model that can't disable reasoning and gets no field — the provider silently runs its default effort, which can dominate run time.
 - The minter is NOT part of the bundle either — changes to `minter/` go live only after `wrangler deploy`.

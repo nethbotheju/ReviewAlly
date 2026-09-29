@@ -8,6 +8,7 @@ import {
   fetchFileContents,
   fetchPullRequest,
   fetchChangedFiles,
+  applyDiffBudget,
   postReview,
   reactToComment,
 } from './github/api';
@@ -118,6 +119,16 @@ async function run(): Promise<void> {
         if (err instanceof RepoTooLargeError) {
           core.warning(err.message);
           useAgent = false;
+          // The selection was uncapped for agent mode; re-apply the standard
+          // budget so the degraded prompt stays bounded.
+          const budgeted = applyDiffBudget(fetchResult.files, {
+            maxFiles: inputs.maxFiles,
+            maxDiffLines: inputs.maxDiffLines,
+          });
+          fetchResult.files = budgeted.files;
+          fetchResult.reviewedFiles = budgeted.files.length;
+          fetchResult.truncated = fetchResult.truncated || budgeted.truncated;
+          fetchResult.truncatedReason = budgeted.truncatedReason ?? fetchResult.truncatedReason;
         } else {
           throw err;
         }

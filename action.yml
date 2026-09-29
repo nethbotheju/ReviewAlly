@@ -41,11 +41,11 @@ inputs:
     required: false
 
   max-files:
-    description: 'Maximum number of changed files to review per run.'
+    description: 'Maximum number of changed files to review per run (standard mode only; agent mode reviews all changed files).'
     required: false
     default: '20'
   max-diff-lines:
-    description: 'Maximum total added lines to review per run (protects token budget).'
+    description: 'Maximum total added lines to review per run, protecting the token budget (standard mode only; agent mode reads diffs on demand via get_diff).'
     required: false
     default: '3000'
   use-default-excludes:
