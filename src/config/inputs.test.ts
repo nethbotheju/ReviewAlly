@@ -17,6 +17,7 @@ const OPTIONAL_DEFAULTS: Record<string, string> = {
   'INPUT_AGENT-TARBALL-MAX-MB': '',
   'INPUT_PI-VERSION': '',
   'INPUT_PI-TIMEOUT-MS': '',
+  'INPUT_PI-LOG': '',
   'INPUT_API-TYPE': '',
   'INPUT_BASE-URL': '',
   INPUT_MODEL: '',
@@ -98,6 +99,20 @@ describe('getRawInputs', () => {
   it('throws on non-numeric pi-timeout-ms', () => {
     setEnv({ 'INPUT_PI-TIMEOUT-MS': 'forever' });
     expect(() => getRawInputs()).toThrow(/Invalid pi-timeout-ms/);
+  });
+
+  it('defaults pi-log to compact and accepts the three levels case-insensitively', () => {
+    setEnv();
+    expect(getRawInputs().piLog).toBe('compact');
+    for (const raw of ['off', 'COMPACT', 'full'] as const) {
+      setEnv({ 'INPUT_PI-LOG': raw });
+      expect(getRawInputs().piLog).toBe(raw.toLowerCase());
+    }
+  });
+
+  it('throws on an unknown pi-log value', () => {
+    setEnv({ 'INPUT_PI-LOG': 'verbose' });
+    expect(() => getRawInputs()).toThrow(/Invalid pi-log/);
   });
 
   it('throws on pi-version with shell metacharacters', () => {

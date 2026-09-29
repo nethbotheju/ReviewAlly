@@ -105,6 +105,12 @@ describe('formatAgentReview', () => {
     expect(body).toContain('2 tool call(s) were interrupted');
   });
 
+  it('marks a partial review when the run hit the hard timeout, even if finish was called', () => {
+    const { body } = formatAgentReview(input({ status: 'partial', timedOut: true }));
+    expect(body).toContain('the agent run hit the hard timeout');
+    expect(body).not.toContain('the agent did not call finish_review');
+  });
+
   it('posts no inline comments and explains when the head is stale', () => {
     const { body, comments } = formatAgentReview(input({ status: 'stale', postInline: false }));
     expect(body).toContain('**Partial review — the PR head moved.**');

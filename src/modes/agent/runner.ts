@@ -9,12 +9,15 @@ import { ensurePiInstalled, invokePi } from './pi-process';
 import { parsePiOutput } from './pi-output';
 import { buildDiffsPayload, collectAgentToolCalls, type AgentToolCalls } from './tools';
 import { extensionSource } from './extension-source';
+import { liveTracer, logTranscript, writeTranscriptFile } from './trace';
 
 export const EXTENSION_FILE = 'reviewally-tools.js';
 export const DIFFS_FILE = 'diffs.json';
 
 export interface AgentRunResult extends ReviewResult {
   toolCalls: AgentToolCalls;
+  /** True when pi hit the hard timeout; the run is a partial review at best. */
+  timedOut: boolean;
 }
 
 /**
@@ -54,27 +57,37 @@ export async function runAgentReview(
         `timeout=${inputs.piTimeoutMs}ms`,
     );
 
-    const { events, stderr } = await invokePi(
+    const { events, stderr, timedOut } = await invokePi(
       cliEntry,
       args,
       repoRoot.path,
       env,
       inputs.piTimeoutMs,
+      liveTracer(inputs.piLog),
     );
 
+    const transcriptFile = writeTranscriptFile(events);
+    core.info(`pi transcript saved to ${transcriptFile}`);
+
+    if (timedOut) {
+      core.warning(`pi review timed out after ${inputs.piTimeoutMs}ms — using partial results.`);
+    }
     if (stderr.trim()) {
       core.warning(`pi stderr (truncated):\n${stderr.trim().slice(0, 2000)}`);
     }
 
     const toolCalls = collectAgentToolCalls(events);
+    const hasSignal =
+      toolCalls.finish !== undefined || toolCalls.findings.length > 0 || toolCalls.diffCalls > 0;
 
     // Findings come from tool calls, so a missing final message is not fatal
-    // when the tools recorded results; otherwise surface the parse failure.
+    // when the tools recorded results; otherwise surface the parse failure with
+    // the full transcript so the run is debuggable.
     let base: ReviewResult;
     try {
       base = parsePiOutput(events);
     } catch (err) {
-      if (toolCalls.finish || toolCalls.findings.length > 0 || toolCalls.diffCalls > 0) {
+      if (hasSignal) {
         base = {
           text: '',
           inputTokens: undefined,
@@ -83,11 +96,12 @@ export async function runAgentReview(
           steps: events.filter((e) => e.type === 'turn_end').length,
         };
       } else {
+        logTranscript(events);
         throw err;
       }
     }
 
-    return { ...base, toolCalls };
+    return { ...base, toolCalls, timedOut };
   } finally {
     try {
       fs.rmSync(configDir, { recursive: true, force: true });

@@ -87,6 +87,7 @@ src/
       tools.ts               # buildDiffsPayload + collectAgentToolCalls (events → findings/finish)
       validate.ts            # host-side finding validation (anchor, evidence, dedupe, caps)
       format.ts              # formatAgentReview — walkthrough body + inline comment bodies
+      trace.ts               # pi run observability: live trace lines, transcript group/file, pi-log levels
 minter/                      # NOT bundled into dist — deployed separately as a Worker
   worker.js                  # token minter: /token endpoint, caller validation, minting
   crypto.js                  # PEM/DER helpers (PKCS#1 → PKCS#8 wrap, proper TLV walking)
@@ -124,7 +125,7 @@ examples/workflow.yml        # the single consumer-facing sample workflow
 - After the run, the PR head is re-fetched; if it moved, the review posts as a partial walkthrough without inline findings (`index.ts`)
 - The API key is injected via environment variable (never argv); `openai-chat-compatible` endpoints are configured via an ephemeral `models.json` (`agent/pi-args.ts`)
 - pi is installed on each run into `~/.cache/reviewally-pi/<version>` (`npm install`, a few seconds); `pi-version` controls the version, `pi-timeout-ms` is the hard kill timeout (pi has no built-in step cap)
-- pi emits a JSONL event stream (`--mode json`, LF-terminated records only) parsed by `agent/pi-output.ts` and `agent/tools.ts`
+- pi emits a JSONL event stream (`--mode json`, LF-terminated records only) parsed by `agent/pi-output.ts` and `agent/tools.ts`; `pi-log` (off/compact/full) streams one readable line per tool call/message into the Actions log, the raw transcript is always saved to `RUNNER_TEMP/pi-transcript.jsonl`, and a timeout resolves with partial events (timedOut=true) instead of discarding them — the run then posts an explicit partial review
 - Tarball too large → auto-degrades to standard mode
 
 ## Build and Release

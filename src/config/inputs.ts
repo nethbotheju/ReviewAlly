@@ -1,9 +1,10 @@
 import * as core from '@actions/core';
-import type { RawActionInputs } from './types';
+import type { PiLogLevel, RawActionInputs } from './types';
 
 const DEFAULT_PI_VERSION = '0.82.1';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
+const PI_LOG_LEVELS: readonly PiLogLevel[] = ['off', 'compact', 'full'];
 
 function parseIntInput(name: string, fallback: number): number {
   const raw = core.getInput(name).trim();
@@ -18,6 +19,16 @@ function parseIntInput(name: string, fallback: number): number {
 function optionalInput(name: string): string | undefined {
   const raw = core.getInput(name).trim();
   return raw === '' ? undefined : raw;
+}
+
+function parsePiLogLevel(): PiLogLevel {
+  const raw = optionalInput('pi-log')?.toLowerCase();
+  if (raw === undefined) return 'compact';
+  const level = PI_LOG_LEVELS.find((l) => l === raw);
+  if (!level) {
+    throw new Error(`Invalid pi-log '${raw}'. Must be one of: off, compact, full.`);
+  }
+  return level;
 }
 
 export function getRawInputs(): RawActionInputs {
@@ -65,5 +76,6 @@ export function getRawInputs(): RawActionInputs {
     agentTarballMaxMb: parseIntInput('agent-tarball-max-mb', 200),
     piVersion,
     piTimeoutMs: parseIntInput('pi-timeout-ms', 600000),
+    piLog: parsePiLogLevel(),
   };
 }

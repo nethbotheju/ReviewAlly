@@ -76,8 +76,11 @@ export function runNpm(args: string[], cwd: string): Promise<void> {
 
 /**
  * Spawn the pi CLI, stream its JSONL stdout into parsed events, and resolve on
- * completion. Enforces a hard timeout (SIGTERM then SIGKILL). Rejects if the
- * process produces no events and exits non-zero, or if it times out.
+ * completion. Enforces a hard timeout (SIGTERM then SIGKILL). `onEvent`, when
+ * given, receives every parsed event in order (live trace). On timeout the
+ * promise RESOLVES with the partial events and `timedOut: true` so the caller
+ * can still use and log what happened before the kill. Rejects only if the
+ * process produces no events and exits non-zero, or fails to spawn.
  */
 export function invokePi(
   cliEntry: string,
@@ -85,7 +88,8 @@ export function invokePi(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Promise<{ events: PiEvent[]; stderr: string }> {
+  onEvent?: (event: PiEvent) => void,
+): Promise<{ events: PiEvent[]; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const events: PiEvent[] = [];
     let stderr = '';
@@ -114,7 +118,10 @@ export function invokePi(
       if (!trimmed.startsWith('{')) return;
       try {
         const parsed: unknown = JSON.parse(trimmed);
-        if (isPiEvent(parsed)) events.push(parsed);
+        if (isPiEvent(parsed)) {
+          events.push(parsed);
+          onEvent?.(parsed);
+        }
       } catch {
         /* skip non-JSON lines */
       }
@@ -149,7 +156,7 @@ export function invokePi(
       if (killTimer) clearTimeout(killTimer);
       if (buffer.trim()) handleLine(buffer);
       if (timedOut) {
-        reject(new Error(`pi review timed out after ${timeoutMs}ms.`));
+        resolve({ events, stderr, timedOut: true });
         return;
       }
       if (code !== 0) {
@@ -165,7 +172,7 @@ export function invokePi(
           );
         }
       }
-      resolve({ events, stderr });
+      resolve({ events, stderr, timedOut: false });
     });
   });
 }

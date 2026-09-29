@@ -30985,6 +30985,7 @@ const core = __importStar(__nccwpck_require__(7484));
 const DEFAULT_PI_VERSION = '0.82.1';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
+const PI_LOG_LEVELS = ['off', 'compact', 'full'];
 function parseIntInput(name, fallback) {
     const raw = core.getInput(name).trim();
     if (raw === '')
@@ -30998,6 +30999,16 @@ function parseIntInput(name, fallback) {
 function optionalInput(name) {
     const raw = core.getInput(name).trim();
     return raw === '' ? undefined : raw;
+}
+function parsePiLogLevel() {
+    const raw = optionalInput('pi-log')?.toLowerCase();
+    if (raw === undefined)
+        return 'compact';
+    const level = PI_LOG_LEVELS.find((l) => l === raw);
+    if (!level) {
+        throw new Error(`Invalid pi-log '${raw}'. Must be one of: off, compact, full.`);
+    }
+    return level;
 }
 function getRawInputs() {
     const apiKey = core.getInput('api-key', { required: true });
@@ -31038,6 +31049,7 @@ function getRawInputs() {
         agentTarballMaxMb: parseIntInput('agent-tarball-max-mb', 200),
         piVersion,
         piTimeoutMs: parseIntInput('pi-timeout-ms', 600000),
+        piLog: parsePiLogLevel(),
     };
 }
 
@@ -31167,6 +31179,7 @@ function resolveInputs(raw, vars) {
         contextDocs: contextDocs.length > 0 ? contextDocs : DEFAULT_CONTEXT_DOCS,
         piVersion: raw.piVersion,
         piTimeoutMs: raw.piTimeoutMs,
+        piLog: raw.piLog ?? 'compact',
     };
     return { inputs, sources };
 }
@@ -31683,7 +31696,7 @@ async function run() {
             const toolCalls = agentResult.toolCalls;
             const status = stale
                 ? 'stale'
-                : toolCalls.finish
+                : toolCalls.finish && !agentResult.timedOut
                     ? 'completed'
                     : 'partial';
             const validation = (0, validate_1.validateAgentFindings)(toolCalls, fetchResult.files, repoRoot.path);
@@ -31699,6 +31712,7 @@ async function run() {
                 truncatedReason: fetchResult.truncatedReason,
                 toolErrors: toolCalls.toolErrors,
                 uncompletedCalls: toolCalls.uncompletedCalls,
+                timedOut: agentResult.timedOut,
                 headSha: pr.headSha,
                 postInline: !stale,
             });
@@ -31890,6 +31904,8 @@ function statusLine(input) {
     }
     if (input.status === 'partial') {
         const reasons = [];
+        if (input.timedOut)
+            reasons.push('the agent run hit the hard timeout');
         if (!input.finish)
             reasons.push('the agent did not call finish_review');
         if (input.uncompletedCalls > 0) {
@@ -32267,10 +32283,13 @@ function runNpm(args, cwd) {
 }
 /**
  * Spawn the pi CLI, stream its JSONL stdout into parsed events, and resolve on
- * completion. Enforces a hard timeout (SIGTERM then SIGKILL). Rejects if the
- * process produces no events and exits non-zero, or if it times out.
+ * completion. Enforces a hard timeout (SIGTERM then SIGKILL). `onEvent`, when
+ * given, receives every parsed event in order (live trace). On timeout the
+ * promise RESOLVES with the partial events and `timedOut: true` so the caller
+ * can still use and log what happened before the kill. Rejects only if the
+ * process produces no events and exits non-zero, or fails to spawn.
  */
-function invokePi(cliEntry, args, cwd, env, timeoutMs) {
+function invokePi(cliEntry, args, cwd, env, timeoutMs, onEvent) {
     return new Promise((resolve, reject) => {
         const events = [];
         let stderr = '';
@@ -32298,8 +32317,10 @@ function invokePi(cliEntry, args, cwd, env, timeoutMs) {
                 return;
             try {
                 const parsed = JSON.parse(trimmed);
-                if (isPiEvent(parsed))
+                if (isPiEvent(parsed)) {
                     events.push(parsed);
+                    onEvent?.(parsed);
+                }
             }
             catch {
                 /* skip non-JSON lines */
@@ -32334,7 +32355,7 @@ function invokePi(cliEntry, args, cwd, env, timeoutMs) {
             if (buffer.trim())
                 handleLine(buffer);
             if (timedOut) {
-                reject(new Error(`pi review timed out after ${timeoutMs}ms.`));
+                resolve({ events, stderr, timedOut: true });
                 return;
             }
             if (code !== 0) {
@@ -32345,7 +32366,7 @@ function invokePi(cliEntry, args, cwd, env, timeoutMs) {
                     core.warning(`pi exited with code ${code} but produced ${events.length} event(s); using partial output.`);
                 }
             }
-            resolve({ events, stderr });
+            resolve({ events, stderr, timedOut: false });
         });
     });
 }
@@ -32403,6 +32424,7 @@ const pi_process_1 = __nccwpck_require__(7603);
 const pi_output_1 = __nccwpck_require__(7269);
 const tools_1 = __nccwpck_require__(8501);
 const extension_source_1 = __nccwpck_require__(2929);
+const trace_1 = __nccwpck_require__(3599);
 exports.EXTENSION_FILE = 'reviewally-tools.js';
 exports.DIFFS_FILE = 'diffs.json';
 /**
@@ -32426,19 +32448,26 @@ async function runAgentReview(systemPrompt, userPrompt, repoRoot, inputs, fetch)
         const env = (0, pi_args_1.buildPiEnv)(inputs, configDir, diffsFile);
         core.info(`pi engine: provider=${(0, pi_args_1.providerFor)(inputs)} model=${inputs.model} ` +
             `timeout=${inputs.piTimeoutMs}ms`);
-        const { events, stderr } = await (0, pi_process_1.invokePi)(cliEntry, args, repoRoot.path, env, inputs.piTimeoutMs);
+        const { events, stderr, timedOut } = await (0, pi_process_1.invokePi)(cliEntry, args, repoRoot.path, env, inputs.piTimeoutMs, (0, trace_1.liveTracer)(inputs.piLog));
+        const transcriptFile = (0, trace_1.writeTranscriptFile)(events);
+        core.info(`pi transcript saved to ${transcriptFile}`);
+        if (timedOut) {
+            core.warning(`pi review timed out after ${inputs.piTimeoutMs}ms — using partial results.`);
+        }
         if (stderr.trim()) {
             core.warning(`pi stderr (truncated):\n${stderr.trim().slice(0, 2000)}`);
         }
         const toolCalls = (0, tools_1.collectAgentToolCalls)(events);
+        const hasSignal = toolCalls.finish !== undefined || toolCalls.findings.length > 0 || toolCalls.diffCalls > 0;
         // Findings come from tool calls, so a missing final message is not fatal
-        // when the tools recorded results; otherwise surface the parse failure.
+        // when the tools recorded results; otherwise surface the parse failure with
+        // the full transcript so the run is debuggable.
         let base;
         try {
             base = (0, pi_output_1.parsePiOutput)(events);
         }
         catch (err) {
-            if (toolCalls.finish || toolCalls.findings.length > 0 || toolCalls.diffCalls > 0) {
+            if (hasSignal) {
                 base = {
                     text: '',
                     inputTokens: undefined,
@@ -32448,10 +32477,11 @@ async function runAgentReview(systemPrompt, userPrompt, repoRoot, inputs, fetch)
                 };
             }
             else {
+                (0, trace_1.logTranscript)(events);
                 throw err;
             }
         }
-        return { ...base, toolCalls };
+        return { ...base, toolCalls, timedOut };
     }
     finally {
         try {
@@ -32772,6 +32802,167 @@ function collectAgentToolCalls(events) {
 }
 function truncate(text, max) {
     return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+
+/***/ }),
+
+/***/ 3599:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.renderTraceLine = renderTraceLine;
+exports.liveTracer = liveTracer;
+exports.logTranscript = logTranscript;
+exports.writeTranscriptFile = writeTranscriptFile;
+const fs = __importStar(__nccwpck_require__(3024));
+const os = __importStar(__nccwpck_require__(8161));
+const path = __importStar(__nccwpck_require__(6760));
+const core = __importStar(__nccwpck_require__(7484));
+const pi_output_1 = __nccwpck_require__(7269);
+const PREFIX = '[pi]';
+const CAPS = {
+    compact: { args: 300, text: 160, result: 0 },
+    full: { args: 2000, text: 1000, result: 400 },
+};
+function truncate(text, max) {
+    return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+function humanBytes(n) {
+    if (n < 1024)
+        return `${n} B`;
+    if (n < 1024 * 1024)
+        return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+function toolResultSize(result) {
+    try {
+        return JSON.stringify(result ?? '').length;
+    }
+    catch {
+        return 0;
+    }
+}
+function toolResultText(result) {
+    if (!result || typeof result !== 'object')
+        return '';
+    const content = result.content;
+    if (!Array.isArray(content))
+        return '';
+    const first = content.find((c) => typeof c === 'object' && c !== null && c.type === 'text');
+    return (first?.text ?? '').replace(/\r?\n/g, ' ').trim();
+}
+/**
+ * Render one pi JSONL event as a single human-readable trace line, or null
+ * when the event is not worth logging at the given level.
+ */
+function renderTraceLine(event, level = 'compact') {
+    if (level === 'off')
+        return null;
+    const caps = CAPS[level];
+    switch (event.type) {
+        case 'tool_execution_start': {
+            if (typeof event.toolName !== 'string')
+                return null;
+            const args = event.args === undefined ? '' : truncate(JSON.stringify(event.args) ?? '', caps.args);
+            return `${PREFIX} tool_call   ${event.toolName} ${args}`.trimEnd();
+        }
+        case 'tool_execution_end': {
+            if (typeof event.toolName !== 'string')
+                return null;
+            const status = event.isError ? 'ERROR' : 'ok';
+            const size = humanBytes(toolResultSize(event.result));
+            const preview = caps.result > 0 ? ` ${truncate(toolResultText(event.result), caps.result)}` : '';
+            return `${PREFIX} tool_result ${event.toolName} ${status} (${size})${preview}`;
+        }
+        case 'message_end': {
+            const message = event.message;
+            if (!message || message.role !== 'assistant')
+                return null;
+            if (message.errorMessage) {
+                return `${PREFIX} error       ${truncate(message.errorMessage, caps.text)}`;
+            }
+            const text = (0, pi_output_1.messageText)(message);
+            if (!text)
+                return null;
+            return `${PREFIX} assistant   ${truncate(text.replace(/\r?\n/g, ' '), caps.text)}`;
+        }
+        case 'turn_end': {
+            const usage = event.message?.usage;
+            if (!usage)
+                return null;
+            return `${PREFIX} turn end    tokens in=${usage.input ?? 0} out=${usage.output ?? 0}`;
+        }
+        case 'auto_retry_start':
+            return `${PREFIX} retry       attempt ${event.attempt ?? '?'}: ${truncate(event.errorMessage ?? '', caps.text)}`;
+        case 'compaction_start':
+            return `${PREFIX} compaction  reason=${event.reason ?? '?'}`;
+        case 'agent_end':
+            return `${PREFIX} agent_end`;
+        default:
+            return null;
+    }
+}
+/** Live-trace hook for invokePi: prints one rendered line per parsed event. */
+function liveTracer(level) {
+    return (event) => {
+        const line = renderTraceLine(event, level);
+        if (line)
+            core.info(line);
+    };
+}
+/**
+ * Dump the full raw event stream into a collapsed log group — the complete
+ * record of what the agent did, for post-mortems on failure or timeout.
+ */
+function logTranscript(events) {
+    core.startGroup(`pi transcript (${events.length} event(s))`);
+    for (const event of events) {
+        core.info(truncate(JSON.stringify(event) ?? '', 4000));
+    }
+    core.endGroup();
+}
+/** Write the raw JSONL transcript next to the runner temp dir; returns its path. */
+function writeTranscriptFile(events) {
+    const dir = process.env.RUNNER_TEMP || os.tmpdir();
+    const file = path.join(dir, 'pi-transcript.jsonl');
+    fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n'));
+    return file;
 }
 
 

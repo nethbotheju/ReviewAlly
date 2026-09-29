@@ -29,4 +29,8 @@ export interface PiEvent {
   args?: unknown;
   result?: unknown;
   isError?: boolean;
+  // Retry / compaction events
+  attempt?: number;
+  reason?: string;
+  errorMessage?: string;
 }

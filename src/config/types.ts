@@ -2,6 +2,7 @@
 
 export type ApiType = 'openai' | 'openai-chat-compatible' | 'anthropic';
 export type ReviewMode = 'standard' | 'agent';
+export type PiLogLevel = 'off' | 'compact' | 'full';
 
 export interface ActionInputs {
   apiType: ApiType;
@@ -25,6 +26,7 @@ export interface ActionInputs {
   // Pi engine (agent mode only)
   piVersion: string;
   piTimeoutMs: number;
+  piLog: PiLogLevel;
 }
 
 export interface RepoRoot {
@@ -66,6 +68,7 @@ export interface RawActionInputs {
   agentTarballMaxMb: number;
   piVersion: string;
   piTimeoutMs: number;
+  piLog?: string;
 }
 
 export interface ResolvedConfig {

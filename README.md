@@ -134,6 +134,7 @@ After the run, ReviewAlly re-validates every candidate against the PR patches an
 | `agent-tarball-max-mb` | no | `200` | Max repo snapshot size before degrading to standard mode |
 | `pi-version` | no | `0.82.1` | Agent runtime version |
 | `pi-timeout-ms` | no | `600000` | Hard timeout for an agent-mode review |
+| `pi-log` | no | `compact` | Agent-run visibility in the Actions log: `off`, `compact`, or `full` |
 
 ¹ Or the matching `REVIEWALLY_*` repository variable — see below.
 
