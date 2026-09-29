@@ -28,6 +28,7 @@ function makeInputs(overrides: Partial<ActionInputs> = {}): ActionInputs {
     piVersion: '0.82.1',
     piTimeoutMs: 600000,
     piLog: 'compact',
+    piThinking: 'off',
     ...overrides,
   };
 }
@@ -80,6 +81,38 @@ describe('buildModelsJson', () => {
     expect(compat?.supportsReasoningEffort).toBe(false);
   });
 
+  it('declares reasoning levels and sends reasoning_effort when a thinking level is set', () => {
+    const json = buildModelsJson(
+      makeInputs({
+        apiType: 'openai-chat-compatible',
+        baseUrl: 'https://x/v1',
+        piThinking: 'low',
+      }),
+    ) as {
+      providers: Record<
+        string,
+        {
+          compat: Record<string, unknown>;
+          models: Array<{
+            id: string;
+            reasoning?: boolean;
+            thinkingLevelMap?: Record<string, string | null>;
+          }>;
+        }
+      >;
+    };
+    const provider = json.providers[PI_CUSTOM_PROVIDER];
+    expect(provider?.compat.supportsReasoningEffort).toBe(true);
+    const model = provider?.models[0];
+    expect(model?.reasoning).toBe(true);
+    expect(model?.thinkingLevelMap).toMatchObject({
+      off: null,
+      low: 'low',
+      high: 'high',
+      max: 'high',
+    });
+  });
+
   it('throws for non-compatible api types', () => {
     expect(() => buildModelsJson(makeInputs({ apiType: 'anthropic' }))).toThrow();
   });
@@ -93,6 +126,8 @@ describe('buildPiArgs', () => {
     expect(args[args.indexOf('--mode') + 1]).toBe('json');
     expect(args).toContain('--offline');
     expect(args[args.indexOf('--thinking') + 1]).toBe('off');
+    const leveled = buildPiArgs(SYSTEM, USER, makeInputs({ piThinking: 'low' }), EXTENSION);
+    expect(leveled[leveled.indexOf('--thinking') + 1]).toBe('low');
     expect(args[args.indexOf('--tools') + 1]).toBe(
       'read,grep,find,ls,get_diff,submit_finding,finish_review',
     );

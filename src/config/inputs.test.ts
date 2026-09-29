@@ -18,6 +18,7 @@ const OPTIONAL_DEFAULTS: Record<string, string> = {
   'INPUT_PI-VERSION': '',
   'INPUT_PI-TIMEOUT-MS': '',
   'INPUT_PI-LOG': '',
+  'INPUT_PI-THINKING': '',
   'INPUT_API-TYPE': '',
   'INPUT_BASE-URL': '',
   INPUT_MODEL: '',
@@ -113,6 +114,15 @@ describe('getRawInputs', () => {
   it('throws on an unknown pi-log value', () => {
     setEnv({ 'INPUT_PI-LOG': 'verbose' });
     expect(() => getRawInputs()).toThrow(/Invalid pi-log/);
+  });
+
+  it('defaults pi-thinking to off and validates the level', () => {
+    setEnv();
+    expect(getRawInputs().piThinking).toBe('off');
+    setEnv({ 'INPUT_PI-THINKING': 'LOW' });
+    expect(getRawInputs().piThinking).toBe('low');
+    setEnv({ 'INPUT_PI-THINKING': 'turbo' });
+    expect(() => getRawInputs()).toThrow(/Invalid pi-thinking/);
   });
 
   it('throws on pi-version with shell metacharacters', () => {

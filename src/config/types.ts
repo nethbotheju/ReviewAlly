@@ -3,6 +3,7 @@
 export type ApiType = 'openai' | 'openai-chat-compatible' | 'anthropic';
 export type ReviewMode = 'standard' | 'agent';
 export type PiLogLevel = 'off' | 'compact' | 'full';
+export type PiThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface ActionInputs {
   apiType: ApiType;
@@ -27,6 +28,7 @@ export interface ActionInputs {
   piVersion: string;
   piTimeoutMs: number;
   piLog: PiLogLevel;
+  piThinking: PiThinkingLevel;
 }
 
 export interface RepoRoot {
@@ -69,6 +71,7 @@ export interface RawActionInputs {
   piVersion: string;
   piTimeoutMs: number;
   piLog?: string;
+  piThinking?: string;
 }
 
 export interface ResolvedConfig {

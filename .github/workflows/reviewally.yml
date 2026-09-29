@@ -28,6 +28,7 @@ jobs:
         with:
           app-token-url: https://api.reviewally.nethbotheju.dev/token
           api-key: ${{ secrets.REVIEWALLY_API_KEY }}
+          pi-thinking: low
         env:
           REVIEWALLY_API_TYPE: ${{ vars.REVIEWALLY_API_TYPE }}
           REVIEWALLY_BASE_URL: ${{ vars.REVIEWALLY_BASE_URL }}

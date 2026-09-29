@@ -30986,6 +30986,15 @@ const DEFAULT_PI_VERSION = '0.82.1';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
 const PI_LOG_LEVELS = ['off', 'compact', 'full'];
+const PI_THINKING_LEVELS = [
+    'off',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+];
 function parseIntInput(name, fallback) {
     const raw = core.getInput(name).trim();
     if (raw === '')
@@ -31007,6 +31016,16 @@ function parsePiLogLevel() {
     const level = PI_LOG_LEVELS.find((l) => l === raw);
     if (!level) {
         throw new Error(`Invalid pi-log '${raw}'. Must be one of: off, compact, full.`);
+    }
+    return level;
+}
+function parsePiThinking() {
+    const raw = optionalInput('pi-thinking')?.toLowerCase();
+    if (raw === undefined)
+        return 'off';
+    const level = PI_THINKING_LEVELS.find((l) => l === raw);
+    if (!level) {
+        throw new Error(`Invalid pi-thinking '${raw}'. Must be one of: off, minimal, low, medium, high, xhigh, max.`);
     }
     return level;
 }
@@ -31050,6 +31069,7 @@ function getRawInputs() {
         piVersion,
         piTimeoutMs: parseIntInput('pi-timeout-ms', 600000),
         piLog: parsePiLogLevel(),
+        piThinking: parsePiThinking(),
     };
 }
 
@@ -31180,6 +31200,7 @@ function resolveInputs(raw, vars) {
         piVersion: raw.piVersion,
         piTimeoutMs: raw.piTimeoutMs,
         piLog: raw.piLog ?? 'compact',
+        piThinking: raw.piThinking ?? 'off',
     };
     return { inputs, sources };
 }
@@ -31961,8 +31982,6 @@ const PI_FLAGS = [
     '--mode',
     'json', // JSONL event stream on stdout
     '--offline', // no startup network (update checks / telemetry) — does not block the model call
-    '--thinking',
-    'off', // cost control
     '--no-extensions', // discovered extensions stay off; the ReviewAlly extension loads explicitly
     '--no-skills',
     '--no-prompt-templates',
@@ -31972,6 +31991,21 @@ const PI_FLAGS = [
     // read-only investigation tools (no bash/edit/write) + ReviewAlly review tools
     'read,grep,find,ls,get_diff,submit_finding,finish_review',
 ];
+/**
+ * OpenAI-style reasoning_effort value for each pi thinking level. pi clamps
+ * the requested level to what the model entry declares; xhigh/max collapse to
+ * 'high' since OpenAI-compatible servers top out there. `off: null` marks
+ * models that cannot disable reasoning — pi then sends no effort field.
+ */
+const THINKING_LEVEL_MAP = {
+    off: null,
+    minimal: 'minimal',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'high',
+    max: 'high',
+};
 /** Map the action's api-type to a pi provider id. */
 function providerFor(inputs) {
     switch (inputs.apiType) {
@@ -31996,6 +32030,10 @@ function buildModelsJson(inputs) {
     if (inputs.apiType !== 'openai-chat-compatible') {
         throw new Error('buildModelsJson is only for openai-chat-compatible.');
     }
+    // With a thinking level above off, declare the model's reasoning capability
+    // so pi transmits reasoning_effort — without it the provider silently uses
+    // its default reasoning level, which can dominate run time.
+    const wantsThinking = inputs.piThinking !== 'off';
     return {
         providers: {
             [exports.PI_CUSTOM_PROVIDER]: {
@@ -32004,9 +32042,18 @@ function buildModelsJson(inputs) {
                 api: 'openai-completions',
                 apiKey: `$${exports.PI_CUSTOM_API_KEY_ENV}`,
                 // Maximise compatibility with arbitrary OpenAI-compatible servers:
-                // send the system prompt as a `system` message and skip reasoning knobs.
-                compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
-                models: [{ id: inputs.model }],
+                // send the system prompt as a `system` message. reasoning_effort is
+                // only sent when the user opts into a thinking level.
+                compat: {
+                    supportsDeveloperRole: false,
+                    supportsReasoningEffort: wantsThinking,
+                },
+                models: [
+                    {
+                        id: inputs.model,
+                        ...(wantsThinking ? { reasoning: true, thinkingLevelMap: THINKING_LEVEL_MAP } : {}),
+                    },
+                ],
             },
         },
     };
@@ -32019,7 +32066,10 @@ function buildModelsJson(inputs) {
  */
 function buildPiArgs(systemPrompt, userPrompt, inputs, extensionPath) {
     return [
-        ...PI_FLAGS,
+        ...PI_FLAGS.slice(0, 4),
+        '--thinking',
+        inputs.piThinking,
+        ...PI_FLAGS.slice(4),
         '--extension',
         extensionPath,
         '--system-prompt',

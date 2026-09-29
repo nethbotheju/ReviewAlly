@@ -23,6 +23,7 @@ function makeInputs(overrides: Partial<ActionInputs> = {}): ActionInputs {
     piVersion: '0.82.1',
     piTimeoutMs: 600000,
     piLog: 'compact',
+    piThinking: 'off',
     ...overrides,
   };
 }

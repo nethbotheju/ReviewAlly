@@ -26,6 +26,7 @@ function rawInputs(overrides: Partial<RawActionInputs> = {}): RawActionInputs {
     piVersion: '0.82.1',
     piTimeoutMs: 600000,
     piLog: 'compact',
+    piThinking: 'off',
     ...overrides,
   };
 }

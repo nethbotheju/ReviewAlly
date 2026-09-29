@@ -1,10 +1,19 @@
 import * as core from '@actions/core';
-import type { PiLogLevel, RawActionInputs } from './types';
+import type { PiLogLevel, PiThinkingLevel, RawActionInputs } from './types';
 
 const DEFAULT_PI_VERSION = '0.82.1';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
 const PI_LOG_LEVELS: readonly PiLogLevel[] = ['off', 'compact', 'full'];
+const PI_THINKING_LEVELS: readonly PiThinkingLevel[] = [
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 
 function parseIntInput(name: string, fallback: number): number {
   const raw = core.getInput(name).trim();
@@ -27,6 +36,18 @@ function parsePiLogLevel(): PiLogLevel {
   const level = PI_LOG_LEVELS.find((l) => l === raw);
   if (!level) {
     throw new Error(`Invalid pi-log '${raw}'. Must be one of: off, compact, full.`);
+  }
+  return level;
+}
+
+function parsePiThinking(): PiThinkingLevel {
+  const raw = optionalInput('pi-thinking')?.toLowerCase();
+  if (raw === undefined) return 'off';
+  const level = PI_THINKING_LEVELS.find((l) => l === raw);
+  if (!level) {
+    throw new Error(
+      `Invalid pi-thinking '${raw}'. Must be one of: off, minimal, low, medium, high, xhigh, max.`,
+    );
   }
   return level;
 }
@@ -77,5 +98,6 @@ export function getRawInputs(): RawActionInputs {
     piVersion,
     piTimeoutMs: parseIntInput('pi-timeout-ms', 600000),
     piLog: parsePiLogLevel(),
+    piThinking: parsePiThinking(),
   };
 }

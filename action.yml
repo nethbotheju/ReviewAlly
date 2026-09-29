@@ -73,6 +73,10 @@ inputs:
     description: "Agent-mode run visibility in the Actions log: off, compact (one line per tool call / message), or full (larger previews). The raw JSONL transcript is always saved to RUNNER_TEMP and dumped in a collapsed group on failure."
     required: false
     default: 'compact'
+  pi-thinking:
+    description: "Agent-mode thinking level passed to pi (off, minimal, low, medium, high, xhigh, max). Set low (or higher) when the model cannot disable reasoning — otherwise it runs at the provider's default effort, which can dominate run time."
+    required: false
+    default: 'off'
 
 outputs:
   summary:
