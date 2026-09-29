@@ -106,7 +106,13 @@ One focused pass: the PR diff plus repository context (`AGENTS.md`, `CONTRIBUTIN
 
 ### Agent
 
-For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head and runs the [pi coding agent](https://github.com/earendil-works/pi) as the review harness. The model investigates with read-only tools (`read`, `grep`, `find`, `ls`) before writing a recommendation, and large repositories automatically fall back to standard mode.
+For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head and runs the [pi coding agent](https://github.com/earendil-works/pi) as the review harness. The model investigates with read-only tools (`read`, `grep`, `find`, `ls`) plus three ReviewAlly review tools:
+
+- **`get_diff`** — page through any changed file's PR patch with old/new line numbers, so findings anchor to lines the PR actually added.
+- **`submit_finding`** — record a verified defect (severity, impact, source evidence, suggested fix) anchored to an added line. Recording posts nothing yet.
+- **`finish_review`** — complete the review with an overall summary, honest limitations, and per-file change summaries.
+
+After the run, ReviewAlly re-validates every candidate against the PR patches and the head snapshot, checks that the PR head has not moved, and posts one review: a status line, a collapsed **Review walkthrough** (changed-file table, diff-inspection coverage, assessment, limitations, reviewed head SHA), and one **inline, replyable GitHub review comment per validated finding**. Rejected candidates and incomplete coverage are shown in the walkthrough — a review that did not finish cleanly is posted as a partial review, never as a clean one. Large repositories automatically fall back to standard mode.
 
 ## Inputs
 
@@ -152,7 +158,7 @@ Switching providers is a pure UI operation: update the API-key secret value, the
 
 ## Outputs
 
-Every review covers the issue and background, the proposed solution, a summary of file changes, and prioritized recommendations. Recommendations are prioritized by impact, focusing on security, edge cases, performance, and design decisions.
+Standard-mode reviews cover the issue and background, the proposed solution, a summary of file changes, and prioritized recommendations. Agent-mode reviews post a walkthrough plus inline findings attached to the changed lines that introduced them — open a thread or reply to discuss any finding.
 
 ## Security and privacy
 

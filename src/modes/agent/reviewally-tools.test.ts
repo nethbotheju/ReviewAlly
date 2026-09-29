@@ -1,0 +1,316 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { EXTENSION_SOURCE_B64, extensionSource } from './extension-source';
+
+const DIFFS_FILE_ENV = 'REVIEWALLY_DIFFS_FILE';
+
+let tmpDir: string;
+let diffsFile: string;
+
+interface RegisteredTool {
+  name: string;
+  parameters: Record<string, unknown>;
+  execute: (
+    id: string,
+    params: Record<string, unknown>,
+    ...rest: unknown[]
+  ) => Promise<{ content: Array<{ type: string; text: string }> }>;
+}
+
+async function loadFreshExtension(tools: RegisteredTool[]): Promise<void> {
+  vi.resetModules();
+  const mod = (await import('./reviewally-tools.js')) as {
+    default: (pi: { registerTool: (t: RegisteredTool) => void }) => void;
+  };
+  mod.default({ registerTool: (t) => tools.push(t) });
+}
+
+async function run(tool: RegisteredTool, params: Record<string, unknown>): Promise<string> {
+  const result = await tool.execute('call-1', params);
+  const first = result.content[0];
+  return first?.type === 'text' ? first.text : '';
+}
+
+function makeFile(
+  pathName: string,
+  lines: Array<Record<string, unknown>>,
+  extra: Record<string, unknown> = {},
+) {
+  return { path: pathName, status: 'modified', additions: 2, deletions: 1, lines, ...extra };
+}
+
+const FILE_A = makeFile('src/a.ts', [
+  { type: 'context', oldLine: 1, newLine: 1, content: 'ctx' },
+  { type: 'delete', oldLine: 2, content: 'old line' },
+  { type: 'add', newLine: 2, content: 'new line' },
+]);
+
+const FINDING = {
+  path: 'src/a.ts',
+  line: 2,
+  title: 'Unbounded index',
+  severity: 'high',
+  impact: 'Lookup can go out of range',
+  evidencePath: 'src/a.ts',
+  evidenceLine: 2,
+  evidence: 'Index never checked',
+  suggestedFix: 'Clamp before use',
+};
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-tools-'));
+  diffsFile = path.join(tmpDir, 'diffs.json');
+  fs.writeFileSync(
+    diffsFile,
+    JSON.stringify({ truncated: false, totalFiles: 1, reviewedFiles: 1, files: [FILE_A] }),
+  );
+  process.env[DIFFS_FILE_ENV] = diffsFile;
+});
+
+afterEach(() => {
+  delete process.env[DIFFS_FILE_ENV];
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('embedded extension source', () => {
+  it('stays in sync with the canonical reviewally-tools.js', async () => {
+    const canonical = fs.readFileSync(path.join(__dirname, 'reviewally-tools.js'), 'utf8');
+    expect(Buffer.from(EXTENSION_SOURCE_B64, 'base64').toString('utf8')).toBe(canonical);
+    expect(extensionSource()).toBe(canonical);
+  });
+
+  it('decodes to runnable JavaScript that registers the tools', async () => {
+    const tools: RegisteredTool[] = [];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-embed-'));
+    try {
+      const file = path.join(dir, 'reviewally-tools.js');
+      fs.writeFileSync(file, extensionSource());
+      vi.resetModules();
+      process.env[DIFFS_FILE_ENV] = diffsFile;
+      const mod = (await import(/* @vite-ignore */ file)) as {
+        default: (pi: { registerTool: (t: RegisteredTool) => void }) => void;
+      };
+      mod.default({ registerTool: (t) => tools.push(t) });
+      expect(tools.map((t) => t.name).sort()).toEqual([
+        'finish_review',
+        'get_diff',
+        'submit_finding',
+      ]);
+    } finally {
+      delete process.env[DIFFS_FILE_ENV];
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('extension registration', () => {
+  it('registers exactly the three ReviewAlly tools with object schemas', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      'finish_review',
+      'get_diff',
+      'submit_finding',
+    ]);
+    for (const t of tools) {
+      expect(t.parameters).toHaveProperty('type', 'object');
+      expect(t.parameters).toHaveProperty('properties');
+    }
+  });
+});
+
+describe('get_diff', () => {
+  it('returns the first page with old/new line numbers and an end marker', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+    const text = await run(getDiff, { path: 'src/a.ts' });
+    expect(text).toContain('src/a.ts — modified, +2 -1, patch lines 1-3 of 3');
+    expect(text).toContain('     1      1   ctx');
+    expect(text).toContain('     2        - old line');
+    expect(text).toContain('            2 + new line');
+    expect(text).toContain('more: no — end of patch');
+  });
+
+  it('pages through a long patch and reports the next offset while more remain', async () => {
+    const lines = Array.from({ length: 450 }, (_, i) => ({
+      type: 'add',
+      newLine: i + 1,
+      content: `line ${i + 1}`,
+    }));
+    fs.writeFileSync(
+      diffsFile,
+      JSON.stringify({
+        truncated: false,
+        totalFiles: 1,
+        reviewedFiles: 1,
+        files: [makeFile('big.ts', lines, { additions: 450, deletions: 0 })],
+      }),
+    );
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+
+    const first = await run(getDiff, { path: 'big.ts' });
+    expect(first).toContain('patch lines 1-200 of 450');
+    expect(first).toContain('more: yes — call get_diff again with path="big.ts" offset=201');
+
+    const second = await run(getDiff, { path: 'big.ts', offset: 201 });
+    expect(second).toContain('patch lines 201-400 of 450');
+    expect(second).toContain('more: yes');
+
+    const last = await run(getDiff, { path: 'big.ts', offset: 401 });
+    expect(last).toContain('patch lines 401-450 of 450');
+    expect(last).toContain('more: no — end of patch');
+  });
+
+  it('rejects unknown paths and lists the inspectable files', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+    await expect(run(getDiff, { path: 'nope.ts' })).rejects.toThrow(
+      /"nope\.ts" is not a changed file in this review\. Inspectable files: src\/a\.ts\./,
+    );
+  });
+
+  it('discloses truncated file selection when rejecting unknown paths', async () => {
+    fs.writeFileSync(
+      diffsFile,
+      JSON.stringify({
+        truncated: true,
+        totalFiles: 9,
+        reviewedFiles: 1,
+        files: [FILE_A],
+      }),
+    );
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+    await expect(run(getDiff, { path: 'nope.ts' })).rejects.toThrow(
+      /truncated \(1 of 9 changed files are inspectable\)/,
+    );
+  });
+
+  it('rejects invalid offsets explicitly with the valid range', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+    await expect(run(getDiff, { path: 'src/a.ts', offset: 0 })).rejects.toThrow(
+      /Invalid offset 0 .* between 1 and 3/,
+    );
+    await expect(run(getDiff, { path: 'src/a.ts', offset: 4 })).rejects.toThrow(
+      /Invalid offset 4 .* between 1 and 3/,
+    );
+    await expect(run(getDiff, { path: 'src/a.ts', offset: 1.5 })).rejects.toThrow(
+      /Invalid offset 1\.5/,
+    );
+  });
+
+  it('rejects an empty or incomplete patch explicitly', async () => {
+    fs.writeFileSync(
+      diffsFile,
+      JSON.stringify({
+        truncated: false,
+        totalFiles: 1,
+        reviewedFiles: 1,
+        files: [makeFile('e.ts', [])],
+      }),
+    );
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+    await expect(run(getDiff, { path: 'e.ts' })).rejects.toThrow(/empty or incomplete/);
+  });
+
+  it('fails closed when no diff data was provided', async () => {
+    delete process.env[DIFFS_FILE_ENV];
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const getDiff = tools.find((t) => t.name === 'get_diff')!;
+    await expect(run(getDiff, { path: 'src/a.ts' })).rejects.toThrow(/REVIEWALLY_DIFFS_FILE/);
+  });
+});
+
+describe('submit_finding', () => {
+  it('records a finding anchored to an added line without posting', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    const text = await run(submit, FINDING);
+    expect(text).toContain('Recorded finding #1 at src/a.ts:2 (high)');
+    expect(text).toContain('nothing is posted yet');
+  });
+
+  it('rejects duplicate locations', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    await run(submit, FINDING);
+    await expect(run(submit, FINDING)).rejects.toThrow(/already recorded at src\/a\.ts:2/);
+  });
+
+  it('rejects anchors that are not added lines', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    await expect(run(submit, { ...FINDING, line: 1 })).rejects.toThrow(
+      /Line 1 of "src\/a\.ts" is not an added line/,
+    );
+    await expect(run(submit, { ...FINDING, line: 999 })).rejects.toThrow(
+      /Line 999 of "src\/a\.ts" is not an added line/,
+    );
+  });
+
+  it('rejects paths outside the review selection', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    await expect(run(submit, { ...FINDING, path: 'other.ts' })).rejects.toThrow(
+      /"other\.ts" is not a changed file/,
+    );
+  });
+
+  it('enforces the finding cap', async () => {
+    const lines = Array.from({ length: 30 }, (_, i) => ({
+      type: 'add',
+      newLine: i + 1,
+      content: `line ${i + 1}`,
+    }));
+    fs.writeFileSync(
+      diffsFile,
+      JSON.stringify({
+        truncated: false,
+        totalFiles: 1,
+        reviewedFiles: 1,
+        files: [makeFile('many.ts', lines, { additions: 30, deletions: 0 })],
+      }),
+    );
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const submit = tools.find((t) => t.name === 'submit_finding')!;
+    for (let i = 0; i < 25; i++) {
+      const text = await run(submit, { ...FINDING, path: 'many.ts', line: i + 1 });
+      expect(text).toContain(`#${i + 1}`);
+    }
+    await expect(run(submit, { ...FINDING, path: 'many.ts', line: 26 })).rejects.toThrow(
+      /Finding limit reached/,
+    );
+  });
+});
+
+describe('finish_review', () => {
+  it('accepts summary, limitations, and file summaries once', async () => {
+    const tools: RegisteredTool[] = [];
+    await loadFreshExtension(tools);
+    const finish = tools.find((t) => t.name === 'finish_review')!;
+    const text = await run(finish, {
+      summary: 'Looks good overall',
+      limitations: ['could not run tests'],
+      fileSummaries: [{ path: 'src/a.ts', description: 'small tweak' }],
+    });
+    expect(text).toContain('Review finished: 0 finding(s) recorded');
+    await expect(run(finish, { summary: 'again' })).rejects.toThrow(/already called/);
+  });
+});

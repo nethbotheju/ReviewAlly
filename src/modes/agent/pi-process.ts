@@ -2,7 +2,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import * as core from '@actions/core';
 import { PI_PACKAGE } from './pi-args';
 import type { PiEvent } from './pi-types';
@@ -107,8 +106,10 @@ export function invokePi(
       }, SIGKILL_DELAY_MS);
     }, timeoutMs);
 
-    const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
-    rl.on('line', (line) => {
+    // JSONL records are LF-terminated. Node's readline also treats U+2028/U+2029
+    // as line separators, which can corrupt records whose JSON strings contain
+    // those characters (e.g. model-authored tool arguments), so split on LF only.
+    const handleLine = (line: string) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith('{')) return;
       try {
@@ -116,6 +117,19 @@ export function invokePi(
         if (isPiEvent(parsed)) events.push(parsed);
       } catch {
         /* skip non-JSON lines */
+      }
+    };
+
+    let buffer = '';
+    child.stdout!.setEncoding('utf-8');
+    child.stdout!.on('data', (chunk: string) => {
+      buffer += chunk;
+      let idx = buffer.indexOf('\n');
+      while (idx !== -1) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        handleLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+        idx = buffer.indexOf('\n');
       }
     });
 
@@ -133,6 +147,7 @@ export function invokePi(
     child.on('close', (code) => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      if (buffer.trim()) handleLine(buffer);
       if (timedOut) {
         reject(new Error(`pi review timed out after ${timeoutMs}ms.`));
         return;

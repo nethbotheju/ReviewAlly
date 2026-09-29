@@ -23,4 +23,10 @@ export interface PiEvent {
   type: string;
   message?: PiMessage;
   messages?: PiMessage[];
+  // Tool-execution events (tool_execution_start / tool_execution_end)
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  result?: unknown;
+  isError?: boolean;
 }

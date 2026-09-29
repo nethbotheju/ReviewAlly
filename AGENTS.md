@@ -60,32 +60,33 @@ src/
     variables.ts             # REVIEWALLY_* repo-variable layer: resolution chain + run-summary rows
     types.ts                 # ActionInputs, RawActionInputs, ApiType, ReviewMode, RepoRoot
   github/
+    api.ts                   # octokit calls: fetch PR/files, tarball, docs, post review, react
     trigger.ts               # event/trigger resolution (PR label, comment, auto)
-    pull-request.ts          # fetch PR + changed files + annotate patch diff
-    posting.ts               # post review + react to comment (octokit)
-    contents.ts              # fetch file contents + tarball (octokit, GHE-aware)
     app-token.ts             # fetchAppToken — minter client (timeout + retry, AppNotInstalledError)
   shared/
-    types.ts                 # AnnotatedLine, ChangedFile, ReviewDocument, ReviewResult
-    util.ts                  # truncate, isWithin, isExcluded, resolveExcludes
-    prompt.ts                # buildSystemPrompt + buildUserPrompt (mode-aware addendum)
-    parse.ts                 # parseReview — lenient JSON parser for LLM output
-    format.ts                # formatReview + formatNoChanges — markdown review body
+    types.ts                 # AnnotatedLine, ChangedFile, FetchResult, ReviewComment, ReviewDocument, ReviewResult
+    util.ts                  # truncate, isExcluded, resolveExcludes
+    prompt.ts                # buildSystemPrompt + buildAgentSystemPrompt + buildUserPrompt
+    parse.ts                 # parseReview — lenient JSON parser (standard mode only)
+    patch.ts                 # annotatePatch — unified diff → annotated lines (old+new numbers)
+    format.ts                # formatReview + formatNoChanges — standard-mode markdown body
   modes/
     standard/
       runner.ts              # runStandardReview — single-turn generateText
       models.ts              # createModel factory (OpenAI, OpenAI-compatible, Anthropic)
     agent/
-      runner.ts              # runAgentReview — orchestrates snapshot + engine
-      snapshot.ts            # tarball download + extraction + tree builder + safeResolve
-      engine/                # pi subprocess implementation
-        constants.ts         # PI_PACKAGE, PI_CUSTOM_PROVIDER, PI_CUSTOM_API_KEY_ENV
-        types.ts             # PiEvent / PiMessage (JSONL event shapes)
-        provider.ts          # providerFor + buildModelsJson (openai-chat-compatible → models.json)
-        install.ts           # ensurePiInstalled + runNpm
-        args.ts              # buildPiArgs + buildPiEnv (CLI args + env, key via env)
-        spawn.ts             # invokePi (subprocess + JSONL streaming + timeout)
-        output.ts            # parsePiOutput + messageText (events → ReviewResult)
+      runner.ts              # runAgentReview — snapshot + pi engine + tool-call collection
+      snapshot.ts            # tarball download + extraction + tree builder
+      pi-args.ts             # PI_PACKAGE, providerFor, buildModelsJson, buildPiArgs, buildPiEnv
+      pi-process.ts          # ensurePiInstalled + runNpm + invokePi (LF-only JSONL streaming)
+      pi-output.ts           # parsePiOutput + messageText (events → ReviewResult)
+      pi-types.ts            # PiEvent / PiMessage (JSONL event shapes, incl. tool events)
+      reviewally-tools.js    # pi extension registering get_diff / submit_finding / finish_review
+                               # (plain-JS ESM, zero deps; copied into the pi config dir and
+                               #  loaded via --extension; bundled as an ncc asset)
+      tools.ts               # buildDiffsPayload + collectAgentToolCalls (events → findings/finish)
+      validate.ts            # host-side finding validation (anchor, evidence, dedupe, caps)
+      format.ts              # formatAgentReview — walkthrough body + inline comment bodies
 minter/                      # NOT bundled into dist — deployed separately as a Worker
   worker.js                  # token minter: /token endpoint, caller validation, minting
   crypto.js                  # PEM/DER helpers (PKCS#1 → PKCS#8 wrap, proper TLV walking)
@@ -116,12 +117,14 @@ examples/workflow.yml        # the single consumer-facing sample workflow
 
 ## Agent Mode Details
 
-- Agent mode downloads the full repo as a tarball via octokit (`github/contents.ts`)
+- Agent mode downloads the full repo as a tarball via octokit (`github/api.ts`)
 - Extracts to a temp dir and spawns `@earendil-works/pi-coding-agent` headless against it
-- pi runs with read-only tools (`read`, `grep`, `find`, `ls`) — no shell, no write, no network exfiltration
-- The API key is injected via environment variable (never argv); `openai-chat-compatible` endpoints are configured via an ephemeral `models.json` (`agent/engine/provider.ts`)
+- pi runs with read-only tools (`read`, `grep`, `find`, `ls`) plus ReviewAlly's `get_diff`, `submit_finding`, and `finish_review` (registered by `agent/reviewally-tools.js`, loaded via `--extension` and fed PR patch data through `REVIEWALLY_DIFFS_FILE`) — no shell, no write, no GitHub-write tool
+- The model's final message is plain prose, never a JSON review: findings and the completion summary are collected from `tool_execution_*` events (`agent/tools.ts`) and re-validated host-side (`agent/validate.ts`) against the PR patches and head snapshot before anything is posted
+- After the run, the PR head is re-fetched; if it moved, the review posts as a partial walkthrough without inline findings (`index.ts`)
+- The API key is injected via environment variable (never argv); `openai-chat-compatible` endpoints are configured via an ephemeral `models.json` (`agent/pi-args.ts`)
 - pi is installed on each run into `~/.cache/reviewally-pi/<version>` (`npm install`, a few seconds); `pi-version` controls the version, `pi-timeout-ms` is the hard kill timeout (pi has no built-in step cap)
-- pi emits a JSONL event stream (`--mode json`) which `agent/engine/output.ts` parses into a `ReviewResult`
+- pi emits a JSONL event stream (`--mode json`, LF-terminated records only) parsed by `agent/pi-output.ts` and `agent/tools.ts`
 - Tarball too large → auto-degrades to standard mode
 
 ## Build and Release
@@ -151,4 +154,4 @@ git push origin v1 --force
 - The minter is NOT part of the bundle either — changes to `minter/` go live only after `wrangler deploy`.
 - `app-token-url` must be `https://` — enforced at input parse time (`config/inputs.ts`).
 - The repo-variable config layer reads `REVIEWALLY_*` from **env**, never the REST API: `GITHUB_TOKEN` is not an allowed token for `GET /repos/{owner}/{repo}/actions/variables` (that needs an App token or PAT with the "Variables" read permission, and `actions: read` does NOT grant it). Workflows therefore forward values with `env: REVIEWALLY_MODEL: ${{ vars.REVIEWALLY_MODEL }}`. Resolution is workflow input > repo variable > built-in default, and validation runs on the *resolved* value — see `config/variables.ts`.
-- The dogfood model (`deepseek-v4-flash` via OpenCode Zen) was chosen because it reliably returns JSON; models that answer in prose break `parseReview`.
+- The dogfood model (`deepseek-v4-flash` via OpenCode Zen) was chosen because it reliably returns JSON for standard mode; models that answer in prose break `parseReview` (standard mode only — agent mode reports through tools and tolerates prose).

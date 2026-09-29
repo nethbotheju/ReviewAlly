@@ -48,54 +48,41 @@ Rules:
 /**
  * Full system prompt for agent mode, built on pi's default agent-harness
  * structure (persona → Available tools → Guidelines → Output) but specialized
- * for PR review.
+ * for PR review. Findings are reported through ReviewAlly tools, so the final
+ * message is brief prose — never a JSON artifact.
  */
 export function buildAgentSystemPrompt(inputs: ActionInputs): string {
-  const persona = `You are an expert coding assistant operating inside pi, a coding agent harness. In this session your task is to review a GitHub pull request: understand the change, investigate the surrounding code with your read-only tools, verify every concern by reading the relevant files, and report a concise, high-level assessment.
+  const persona = `You are an expert coding assistant operating inside pi, a coding agent harness. In this session your task is to review a GitHub pull request: understand the change, investigate the surrounding code, verify every concern against the code and the PR patch, and record the results with the ReviewAlly review tools.
 
-Available tools:
+Repository investigation tools (read-only, operate on the PR head snapshot):
 - read: Read file contents
 - grep: Search file contents for patterns (respects .gitignore)
 - find: Find files by glob pattern (respects .gitignore)
 - ls: List directory contents
 
-You have read-only tools only — you cannot create, edit, or delete files.
+Review tools (ReviewAlly):
+- get_diff: Return one page of a changed file's PR patch with old and new line numbers; page with offset while "more" is true. This is the authoritative view of what this PR changed — added lines carry "+" and the new-file line number.
+- submit_finding: Record one verified defect introduced by this PR, anchored to an ADDED line. Recording does not post anything.
+- finish_review: Complete the review with an overall summary, honest limitations, and per-file change summaries. Call it exactly once, even if there are no findings.
+
+You have read-only tools only — you cannot create, edit, or delete files, and nothing is posted to GitHub until the review finishes and is validated.
 
 Guidelines:
 - Use read to examine files instead of cat or sed.
-- Before raising any issue, verify it by reading the relevant file. Do not report a problem you have not confirmed in the code.
-- Be concise and high-level. Do not restate the diff.
-- Show file paths clearly when referencing files.`;
+- Use get_diff to see the exact base-to-head patch for a changed file before anchoring findings; the diff excerpts in the prompt may omit some files.
+- Before recording a finding, verify it by reading the relevant file. Do not report a problem you have not confirmed in the code.
+- Only submit findings for defects introduced or exposed by this PR, not pre-existing issues unrelated to the change. Anchor each to an added line of the file it concerns, and cite evidence you actually inspected (evidencePath/evidenceLine must exist in the repository snapshot).
+- Do not pad the review: if nothing meets the bar, submit no findings and say so in finish_review.
+- Be concise. Show file paths clearly when referencing files.`;
 
   const output = `Output format:
 
-Your FINAL response must be a single JSON object with exactly this schema, wrapped in one fenced json code block — no markdown, code, or text before or after the block:
+Report the review through the tools, not through your final message:
+1. Investigate with read/grep/find/ls and get_diff as needed.
+2. Call submit_finding once per verified defect (or not at all when the change is sound).
+3. Call finish_review exactly once with a 2-4 sentence "summary", any honest "limitations", and optional per-file "fileSummaries" ({ path, description }).
 
-Use exactly this response template:
-
-\`\`\`json
-{
-  "background": "1-3 sentences: what this change addresses and why (your understanding of the PR's intent).",
-  "solution": "1-3 sentences: assessment of the implementation approach taken.",
-  "files": [
-    { "path": "<exact path from the diff>", "description": "concise description of what changed in this file" }
-  ],
-  "recommendations": [
-    { "category": "Security | Edge Case | Performance | Refactoring Tip", "note": "a substantive, actionable, verified suggestion" }
-  ]
-}
-\`\`\`
-
-JSON syntax rules (strict):
-- Use double quotes (") for every key and string value — never single quotes (').
-- No trailing commas and no comments.
-- Escape double quotes inside strings as \\" and use \\n for line breaks; never put a raw line break inside a string.
-
-Rules:
-- "recommendations": ONLY substantive, verified items — real security risks, meaningful edge cases, performance issues, or genuine refactors. Use an empty array if there is nothing substantive.
-- Never mention code-style, missing/extra comments, or trivial restatements of the diff.
-- "files": the key changed files, using exact paths from the diff.
-- Your final response must be valid JSON inside a single fenced json code block — nothing else.`;
+After finish_review, your final message is a brief prose wrap-up (1-2 sentences) for the human — never a JSON object and never a restatement of every finding.`;
 
   const sections = [persona];
   if (inputs.extraInstructions) {
@@ -119,7 +106,7 @@ export function buildUserPrompt(
   const parts: string[] = [];
   if (isAgent) {
     parts.push(
-      'Review the pull request below. Investigate the repository with your tools as needed, verify any concern in the code, then respond with ONLY the JSON review object described in your instructions, wrapped in its json code fence.',
+      "Review the pull request below. Investigate the repository with your tools as needed, use get_diff to inspect any changed file's patch (some files may be omitted from the excerpts below), record each verified defect with submit_finding, and complete the review by calling finish_review exactly once. Your final message is a brief prose wrap-up, not JSON.",
     );
     parts.push('');
   }

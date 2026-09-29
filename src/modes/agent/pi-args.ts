@@ -9,6 +9,9 @@ export const PI_CUSTOM_PROVIDER = 'custom';
 /** Env var referenced by models.json ($ interpolation) for the compatible key. */
 export const PI_CUSTOM_API_KEY_ENV = 'CUSTOM_API_KEY';
 
+/** Env var pointing the ReviewAlly tools extension at the PR patch data. */
+export const PI_DIFFS_FILE_ENV = 'REVIEWALLY_DIFFS_FILE';
+
 /** Headless, ephemeral, read-only flags. Reused across runs and asserted by tests. */
 const PI_FLAGS = [
   '-p', // print mode: process the prompt and exit
@@ -18,13 +21,14 @@ const PI_FLAGS = [
   '--offline', // no startup network (update checks / telemetry) — does not block the model call
   '--thinking',
   'off', // cost control
-  '--no-extensions',
+  '--no-extensions', // discovered extensions stay off; the ReviewAlly extension loads explicitly
   '--no-skills',
   '--no-prompt-templates',
   '--no-context-files',
   '--no-themes',
   '--tools',
-  'read,grep,find,ls', // read-only investigation tools (no bash/edit/write)
+  // read-only investigation tools (no bash/edit/write) + ReviewAlly review tools
+  'read,grep,find,ls,get_diff,submit_finding,finish_review',
 ] as const;
 
 /** Map the action's api-type to a pi provider id. */
@@ -69,16 +73,21 @@ export function buildModelsJson(inputs: ActionInputs): Record<string, unknown> {
 }
 
 /**
- * Build the pi CLI args for a headless read-only review run.
- * Assumes models.json (for compatible) has already been written to the config dir.
+ * Build the pi CLI args for a headless read-only review run. The ReviewAlly
+ * tools extension is passed explicitly (explicit --extension paths load even
+ * with --no-extensions). Assumes models.json (for compatible) has already
+ * been written to the config dir.
  */
 export function buildPiArgs(
   systemPrompt: string,
   userPrompt: string,
   inputs: ActionInputs,
+  extensionPath: string,
 ): string[] {
   return [
     ...PI_FLAGS,
+    '--extension',
+    extensionPath,
     '--system-prompt',
     systemPrompt,
     '--provider',
@@ -90,11 +99,18 @@ export function buildPiArgs(
 }
 
 /** Build the child-process env. The API key is injected via env, never argv. */
-export function buildPiEnv(inputs: ActionInputs, configDir: string): NodeJS.ProcessEnv {
+export function buildPiEnv(
+  inputs: ActionInputs,
+  configDir: string,
+  diffsFile?: string,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PI_CODING_AGENT_DIR: configDir,
   };
+  if (diffsFile) {
+    env[PI_DIFFS_FILE_ENV] = diffsFile;
+  }
   if (inputs.apiType === 'anthropic') {
     env.ANTHROPIC_API_KEY = inputs.apiKey;
   } else if (inputs.apiType === 'openai') {

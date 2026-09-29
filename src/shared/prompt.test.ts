@@ -75,19 +75,25 @@ describe('buildAgentSystemPrompt', () => {
     expect(prompt).toContain('read-only tools only');
   });
 
-  it('requires verified findings and JSON-only output', () => {
+  it('lists the ReviewAlly review tools and their contract', () => {
     const prompt = buildAgentSystemPrompt(makeInputs({ reviewMode: 'agent' }));
-    expect(prompt).toContain('verify it by reading the relevant file');
-    expect(prompt).toContain('fenced json code block');
-    expect(prompt).toContain('"background"');
-    expect(prompt).toContain('"recommendations"');
+    expect(prompt).toContain('- get_diff:');
+    expect(prompt).toContain('- submit_finding:');
+    expect(prompt).toContain('- finish_review:');
+    expect(prompt).toContain('anchored to an ADDED line');
+    expect(prompt).toContain('Recording does not post anything');
+    expect(prompt).toContain('exactly once');
   });
 
-  it('specifies strict JSON syntax and a fenced template', () => {
+  it('requires verified findings and a tool-driven workflow, not JSON output', () => {
     const prompt = buildAgentSystemPrompt(makeInputs({ reviewMode: 'agent' }));
-    expect(prompt).toContain('never single quotes');
-    expect(prompt).toContain('```json');
-    expect(prompt).toContain('Use exactly this response template');
+    expect(prompt).toContain('verify it by reading the relevant file');
+    expect(prompt).toContain('introduced or exposed by this PR');
+    // the final message is prose — the JSON contract is gone
+    expect(prompt).not.toContain('fenced json code block');
+    expect(prompt).not.toContain('```json');
+    expect(prompt).not.toContain('never single quotes');
+    expect(prompt).toContain('never a JSON object');
   });
 
   it('omits pi-internal docs/themes/skills guidance irrelevant to a review', () => {
@@ -132,11 +138,13 @@ describe('buildUserPrompt', () => {
     expect(result).toContain('src/index.ts');
   });
 
-  it('prepends the review task directive in agent mode', () => {
+  it('prepends the tool-driven review directive in agent mode', () => {
     const result = buildUserPrompt(mockPr, mockFiles, undefined, true);
     expect(result.startsWith('Review the pull request below')).toBe(true);
-    expect(result).toContain('ONLY the JSON review object');
-    expect(result).toContain('Investigate the repository with your tools');
+    expect(result).toContain('get_diff');
+    expect(result).toContain('submit_finding');
+    expect(result).toContain('finish_review');
+    expect(result).toContain('not JSON');
   });
 
   it('omits the tool directive in standard mode', () => {

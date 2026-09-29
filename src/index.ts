@@ -17,6 +17,8 @@ import { formatNoChanges, formatRepairWarning, formatReview } from './shared/for
 import { runStandardReview } from './modes/standard/runner';
 import { createModel } from './modes/standard/models';
 import { runAgentReview } from './modes/agent/runner';
+import { formatAgentReview, type AgentReviewStatus } from './modes/agent/format';
+import { validateAgentFindings } from './modes/agent/validate';
 import {
   prepareRepoSnapshot,
   buildRepoTree,
@@ -136,28 +138,83 @@ async function run(): Promise<void> {
     );
 
     // Run review
-    const reviewResult =
+    const agentResult =
       useAgent && repoRoot
-        ? await runAgentReview(systemPrompt, userPrompt, repoRoot, inputs)
-        : await runStandardReview(createModel(inputs), systemPrompt, userPrompt);
+        ? await runAgentReview(systemPrompt, userPrompt, repoRoot, inputs, fetchResult)
+        : undefined;
+    const reviewResult = agentResult
+      ? agentResult
+      : await runStandardReview(createModel(inputs), systemPrompt, userPrompt);
 
     core.info(
       `Review done. tokens in=${reviewResult.inputTokens} out=${reviewResult.outputTokens} tot=${reviewResult.totalTokens} steps=${reviewResult.steps}`,
     );
 
-    // Parse, format, post
-    modelResponse = reviewResult.text;
-    const doc = parseReview(reviewResult.text, {
-      onRepair: () => {
-        repaired = true;
-      },
-    });
-    const body = formatReview(doc, fetchResult.files);
-    await postReview(octokit, owner, repo, pullNumber, pr.headSha, body, []);
-    if (repaired) {
-      core.warning(formatRepairWarning(reviewResult.text));
+    if (agentResult && repoRoot) {
+      modelResponse = agentResult.text;
+      // The PR must not have moved while the agent ran: inline findings anchor
+      // to the reviewed head, so a stale head posts no inline comments.
+      const current = await fetchPullRequest(octokit, owner, repo, pullNumber);
+      const stale = current.headSha !== pr.headSha;
+      if (stale) {
+        core.warning(
+          `PR head moved during the review (${pr.headSha.slice(0, 8)} → ${current.headSha.slice(0, 8)}); posting a partial review without inline findings.`,
+        );
+      }
+
+      const toolCalls = agentResult.toolCalls;
+      const status: AgentReviewStatus = stale
+        ? 'stale'
+        : toolCalls.finish
+          ? 'completed'
+          : 'partial';
+
+      const validation = validateAgentFindings(toolCalls, fetchResult.files, repoRoot.path);
+      const formatted = formatAgentReview({
+        status,
+        finish: toolCalls.finish,
+        validFindings: validation.valid,
+        rejected: validation.rejected,
+        capped: validation.capped,
+        files: fetchResult.files,
+        inspectedPaths: toolCalls.inspectedPaths,
+        selectionTruncated: fetchResult.truncated,
+        truncatedReason: fetchResult.truncatedReason,
+        toolErrors: toolCalls.toolErrors,
+        uncompletedCalls: toolCalls.uncompletedCalls,
+        headSha: pr.headSha,
+        postInline: !stale,
+      });
+
+      await postReview(
+        octokit,
+        owner,
+        repo,
+        pullNumber,
+        pr.headSha,
+        formatted.body,
+        formatted.comments,
+      );
+      core.setOutput('summary', toolCalls.finish?.summary || 'Agent review posted.');
+      core.info(
+        `Posted agent review: status=${status}, ${formatted.comments.length} inline finding(s), ` +
+          `${validation.rejected.length} rejected.`,
+      );
+    } else {
+      // Parse, format, post
+      modelResponse = reviewResult.text;
+      const doc = parseReview(reviewResult.text, {
+        onRepair: () => {
+          repaired = true;
+        },
+      });
+      const body = formatReview(doc, fetchResult.files);
+      await postReview(octokit, owner, repo, pullNumber, pr.headSha, body, []);
+      if (repaired) {
+        core.warning(formatRepairWarning(reviewResult.text));
+      }
+      core.setOutput('summary', doc.solution || doc.background);
     }
-    core.setOutput('summary', doc.solution || doc.background);
 
     core.info('Posted review.');
     if (commentId) await reactToComment(octokit, owner, repo, commentId, '+1');
