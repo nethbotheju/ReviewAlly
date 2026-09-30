@@ -163,6 +163,67 @@ describe('buildUserPrompt', () => {
     expect(result).toContain('// new feature');
   });
 
+  it('agent mode defers files over the diff budget to get_diff and stays small', () => {
+    const bigLine = (n: number) => ({
+      type: 'add' as const,
+      newLine: n,
+      content: 'x'.repeat(120),
+    });
+    const bigFile = (name: string): ChangedFile => ({
+      filename: name,
+      status: 'modified',
+      additions: 500,
+      deletions: 0,
+      lines: Array.from({ length: 500 }, (_, i) => bigLine(i + 1)),
+    });
+    const files = [...mockFiles, bigFile('big-b.ts'), bigFile('big-c.ts')];
+    const result = buildUserPrompt(mockPr, files, undefined, true);
+    // the small file's diff is still embedded…
+    expect(result).toContain('```diff');
+    expect(result).toContain('// new feature');
+    // …while the oversized ones are listed for get_diff
+    expect(result).toContain('file(s) not embedded — inspect with get_diff');
+    expect(result).toContain('- big-b.ts  (+500 -0, modified)');
+    expect(result).toContain('- big-c.ts  (+500 -0, modified)');
+    // the whole prompt stays far below the ~128KB single-argument OS limit
+    expect(Buffer.byteLength(result, 'utf8')).toBeLessThan(100_000);
+  });
+
+  it('agent mode still defers a single oversized first file instead of embedding it', () => {
+    const huge: ChangedFile = {
+      filename: 'huge.ts',
+      status: 'modified',
+      additions: 5000,
+      deletions: 0,
+      lines: Array.from({ length: 5000 }, (_, i) => ({
+        type: 'add',
+        newLine: i + 1,
+        content: 'x'.repeat(120),
+      })),
+    };
+    const result = buildUserPrompt(mockPr, [huge], undefined, true);
+    expect(result).not.toContain('```diff');
+    expect(result).toContain('file(s) not embedded — inspect with get_diff');
+    expect(result).toContain('- huge.ts  (+5000 -0, modified)');
+  });
+
+  it('standard mode embeds every diff regardless of size (API message, not argv)', () => {
+    const huge: ChangedFile = {
+      filename: 'huge.ts',
+      status: 'modified',
+      additions: 5000,
+      deletions: 0,
+      lines: Array.from({ length: 5000 }, (_, i) => ({
+        type: 'add',
+        newLine: i + 1,
+        content: 'x'.repeat(120),
+      })),
+    };
+    const result = buildUserPrompt(mockPr, [huge]);
+    expect(result).toContain('```diff');
+    expect(result).not.toContain('not embedded');
+  });
+
   it('includes repository tree when provided', () => {
     const ctx: PromptContext = { tree: '  src/\n  src/index.ts\n  README.md' };
     const result = buildUserPrompt(mockPr, mockFiles, ctx);

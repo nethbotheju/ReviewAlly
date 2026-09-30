@@ -33592,7 +33592,7 @@ You have read-only tools only — you cannot create, edit, or delete files, and 
 
 Guidelines:
 - Use read to examine files instead of cat or sed.
-- Use get_diff to see the exact base-to-head patch for a changed file before anchoring findings; the diff excerpts in the prompt may omit some files.
+- Use get_diff to see the exact base-to-head patch for a changed file before anchoring findings; large diffs may not be embedded in the prompt, but every changed file is fully inspectable with get_diff.
 - Before recording a finding, verify it by reading the relevant file. Do not report a problem you have not confirmed in the code.
 - Only submit findings for defects introduced or exposed by this PR, not pre-existing issues unrelated to the change. Anchor each to an added line of the file it concerns, and cite evidence you actually inspected (evidencePath/evidenceLine must exist in the repository snapshot).
 - Do not pad the review: if nothing meets the bar, submit no findings and say so in finish_review.
@@ -33612,10 +33612,17 @@ After finish_review, your final message is a brief prose wrap-up (1-2 sentences)
     sections.push(output);
     return sections.join('\n\n');
 }
+/**
+ * Byte budget for embedded diff excerpts in agent mode. The prompt travels as
+ * a single pi CLI argument, and Linux caps one argument at ~128KB
+ * (MAX_ARG_STRLEN) — spawn fails with E2BIG beyond that. Files over budget are
+ * listed and deferred to get_diff, which serves every changed file.
+ */
+const AGENT_DIFF_BUDGET_BYTES = 40_000;
 function buildUserPrompt(pr, files, ctx, isAgent = false) {
     const parts = [];
     if (isAgent) {
-        parts.push("Review the pull request below. Investigate the repository with your tools as needed, use get_diff to inspect any changed file's patch (some files may be omitted from the excerpts below), record each verified defect with submit_finding, and complete the review by calling finish_review exactly once. Your final message is a brief prose wrap-up, not JSON.");
+        parts.push("Review the pull request below. Investigate the repository with your tools as needed, use get_diff to inspect any changed file's patch (files whose diff is not embedded below must be inspected with get_diff), record each verified defect with submit_finding, and complete the review by calling finish_review exactly once. Your final message is a brief prose wrap-up, not JSON.");
         parts.push('');
     }
     parts.push(`# Pull Request #${pr.number}: ${pr.title}`);
@@ -33640,10 +33647,30 @@ function buildUserPrompt(pr, files, ctx, isAgent = false) {
     }
     parts.push('');
     parts.push(`## Changed files (${files.length})`);
-    parts.push('Below are the changed files and their diffs.');
+    if (isAgent) {
+        parts.push('Diff excerpts are embedded below up to a size budget; every changed file is fully inspectable with get_diff.');
+    }
+    else {
+        parts.push('Below are the changed files and their diffs.');
+    }
     parts.push('');
+    const deferred = [];
+    let budget = isAgent ? AGENT_DIFF_BUDGET_BYTES : Number.POSITIVE_INFINITY;
     for (const file of files) {
-        parts.push(renderFile(file));
+        const rendered = renderFile(file);
+        if (rendered.length > budget) {
+            deferred.push(file);
+            continue;
+        }
+        parts.push(rendered);
+        parts.push('');
+        budget -= rendered.length;
+    }
+    if (deferred.length > 0) {
+        parts.push(`### ${deferred.length} file(s) not embedded — inspect with get_diff`);
+        for (const file of deferred) {
+            parts.push(`- ${file.filename}  (+${file.additions} -${file.deletions}, ${file.status})`);
+        }
         parts.push('');
     }
     return parts.join('\n');
