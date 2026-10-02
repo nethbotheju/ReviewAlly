@@ -43,6 +43,7 @@ describe('renderTraceLine', () => {
       }),
     );
     expect(line).toContain('tool_result submit_finding ERROR');
+    expect(line).toContain('Line 1 is not an added line');
   });
 
   it('includes a result preview only at full level', () => {
@@ -81,6 +82,16 @@ describe('renderTraceLine', () => {
       message: { role: 'assistant', content: [], errorMessage: '401 invalid key' },
     });
     expect(renderTraceLine(err)).toBe('[pi] error       401 invalid key');
+  });
+
+  it('shows the transition from investigation to wrap-up', () => {
+    expect(
+      renderTraceLine(
+        ev('message_end', {
+          message: { role: 'custom', customType: 'reviewally_budget', content: 'Wrap up.' },
+        }),
+      ),
+    ).toContain('investigation budget exhausted; wrapping up');
   });
 
   it('renders per-turn token usage', () => {

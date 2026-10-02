@@ -106,7 +106,7 @@ export function invokePi(
       timedOut = true;
       child.kill('SIGTERM');
       killTimer = setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL');
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
       }, SIGKILL_DELAY_MS);
     }, timeoutMs);
 

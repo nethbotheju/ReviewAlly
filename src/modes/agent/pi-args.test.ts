@@ -124,7 +124,7 @@ describe('buildPiArgs', () => {
     expect(args).toContain('-p');
     expect(args).toContain('--no-session');
     expect(args[args.indexOf('--mode') + 1]).toBe('json');
-    expect(args).toContain('--offline');
+    expect(args).not.toContain('--offline');
     expect(args[args.indexOf('--thinking') + 1]).toBe('off');
     const leveled = buildPiArgs(SYSTEM, USER, makeInputs({ piThinking: 'low' }), EXTENSION);
     expect(leveled[leveled.indexOf('--thinking') + 1]).toBe('low');
@@ -174,6 +174,8 @@ describe('buildPiEnv', () => {
     const env = buildPiEnv(makeInputs({ apiType: 'anthropic', apiKey: 'sk-secret' }), '/tmp/cfg');
     expect(env.ANTHROPIC_API_KEY).toBe('sk-secret');
     expect(env.PI_CODING_AGENT_DIR).toBe('/tmp/cfg');
+    expect(env.PI_OFFLINE).toBe('0');
+    expect(env.REVIEWALLY_TIMEOUT_MS).toBe('600000');
     expect(env.REVIEWALLY_DIFFS_FILE).toBeUndefined();
   });
 

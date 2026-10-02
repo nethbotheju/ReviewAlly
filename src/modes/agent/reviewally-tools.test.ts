@@ -20,12 +20,26 @@ interface RegisteredTool {
   ) => Promise<{ content: Array<{ type: string; text: string }> }>;
 }
 
-async function loadFreshExtension(tools: RegisteredTool[]): Promise<void> {
+function makeExtensionApi(tools: RegisteredTool[]) {
+  const handlers = new Map<string, () => void>();
+  return {
+    handlers,
+    registerTool: (tool: RegisteredTool) => tools.push(tool),
+    on: (event: string, handler: () => void) => handlers.set(event, handler),
+    setActiveTools: vi.fn(),
+    setThinkingLevel: vi.fn(),
+    sendMessage: vi.fn(),
+  };
+}
+
+async function loadFreshExtension(tools: RegisteredTool[]) {
   vi.resetModules();
   const mod = (await import('./reviewally-tools.js')) as {
-    default: (pi: { registerTool: (t: RegisteredTool) => void }) => void;
+    default: (pi: ReturnType<typeof makeExtensionApi>) => void;
   };
-  mod.default({ registerTool: (t) => tools.push(t) });
+  const pi = makeExtensionApi(tools);
+  mod.default(pi);
+  return pi;
 }
 
 async function run(tool: RegisteredTool, params: Record<string, unknown>): Promise<string> {
@@ -77,6 +91,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  delete process.env.REVIEWALLY_TIMEOUT_MS;
   delete process.env[DIFFS_FILE_ENV];
   process.chdir(oldCwd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -98,9 +114,9 @@ describe('embedded extension source', () => {
       vi.resetModules();
       process.env[DIFFS_FILE_ENV] = diffsFile;
       const mod = (await import(/* @vite-ignore */ file)) as {
-        default: (pi: { registerTool: (t: RegisteredTool) => void }) => void;
+        default: (pi: ReturnType<typeof makeExtensionApi>) => void;
       };
-      mod.default({ registerTool: (t) => tools.push(t) });
+      mod.default(makeExtensionApi(tools));
       expect(tools.map((t) => t.name).sort()).toEqual([
         'finish_review',
         'get_diff',
@@ -326,6 +342,77 @@ describe('submit_finding', () => {
     await expect(run(submit, { ...FINDING, path: 'many.ts', line: 26 })).rejects.toThrow(
       /Finding limit reached/,
     );
+  });
+});
+
+describe('investigation budget', () => {
+  it('reserves the last 30% for reporting and sends one steering message', async () => {
+    vi.useFakeTimers();
+    process.env.REVIEWALLY_TIMEOUT_MS = '10000';
+    const pi = await loadFreshExtension([]);
+    pi.handlers.get('session_start')!();
+    vi.advanceTimersByTime(6999);
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(pi.setActiveTools).toHaveBeenCalledWith(['submit_finding', 'finish_review']);
+    expect(pi.setThinkingLevel).toHaveBeenCalledWith('low');
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customType: 'reviewally_budget',
+        content: expect.stringContaining('call finish_review immediately'),
+      }),
+      { deliverAs: 'steer', triggerTurn: true },
+    );
+    vi.advanceTimersByTime(10000);
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not steer a review that already finished', async () => {
+    vi.useFakeTimers();
+    process.env.REVIEWALLY_TIMEOUT_MS = '10000';
+    const tools: RegisteredTool[] = [];
+    const pi = await loadFreshExtension(tools);
+    pi.handlers.get('session_start')!();
+    await run(
+      tools.find((tool) => tool.name === 'finish_review')!,
+      { summary: 'Done' },
+    );
+    vi.advanceTimersByTime(10000);
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+    await expect(
+      run(
+        tools.find((tool) => tool.name === 'submit_finding')!,
+        FINDING,
+      ),
+    ).rejects.toThrow(/already complete/);
+  });
+
+  it.each(['agent_settled', 'session_shutdown'])('clears the timer on %s', async (event) => {
+    vi.useFakeTimers();
+    process.env.REVIEWALLY_TIMEOUT_MS = '10000';
+    const pi = await loadFreshExtension([]);
+    pi.handlers.get('session_start')!();
+    pi.handlers.get(event)!();
+    vi.advanceTimersByTime(10000);
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the deadline across agent runs that may retry', async () => {
+    vi.useFakeTimers();
+    process.env.REVIEWALLY_TIMEOUT_MS = '10000';
+    const pi = await loadFreshExtension([]);
+    pi.handlers.get('session_start')!();
+    pi.handlers.get('agent_end')?.();
+    vi.advanceTimersByTime(7000);
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['', 'invalid', '0', '-1'])('ignores invalid timeout %j', async (timeout) => {
+    vi.useFakeTimers();
+    process.env.REVIEWALLY_TIMEOUT_MS = timeout;
+    const pi = await loadFreshExtension([]);
+    pi.handlers.get('session_start')!();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

@@ -176,7 +176,7 @@ async function run(): Promise<void> {
       const toolCalls = agentResult.toolCalls;
       const status: AgentReviewStatus = stale
         ? 'stale'
-        : toolCalls.finish && !agentResult.timedOut
+        : toolCalls.finish && !agentResult.timedOut && !agentResult.budgetLimited
           ? 'completed'
           : 'partial';
 
@@ -194,6 +194,7 @@ async function run(): Promise<void> {
         toolErrors: toolCalls.toolErrors,
         uncompletedCalls: toolCalls.uncompletedCalls,
         timedOut: agentResult.timedOut,
+        budgetLimited: agentResult.budgetLimited,
         headSha: pr.headSha,
         postInline: !stale,
       });

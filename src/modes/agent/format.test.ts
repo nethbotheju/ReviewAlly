@@ -111,6 +111,14 @@ describe('formatAgentReview', () => {
     expect(body).not.toContain('the agent did not call finish_review');
   });
 
+  it('marks budget-limited wrap-up as partial while retaining the assessment and findings', () => {
+    const { body, comments } = formatAgentReview(input({ status: 'partial', budgetLimited: true }));
+    expect(body).toContain('**Partial review** — the investigation time budget was exhausted');
+    expect(body).toContain(FINISH.summary);
+    expect(body).not.toContain('**Completed');
+    expect(comments).toHaveLength(1);
+  });
+
   it('posts no inline comments and explains when the head is stale', () => {
     const { body, comments } = formatAgentReview(input({ status: 'stale', postInline: false }));
     expect(body).toContain('**Partial review — the PR head moved.**');

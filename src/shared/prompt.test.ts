@@ -98,6 +98,15 @@ describe('buildAgentSystemPrompt', () => {
     expect(prompt).toContain('never a JSON object');
   });
 
+  it('prioritizes investigation and requires incremental reporting within the time budget', () => {
+    const prompt = buildAgentSystemPrompt(makeInputs({ piTimeoutMs: 120000 }));
+    expect(prompt).toContain('Submit each verified finding immediately');
+    expect(prompt).toContain('120 seconds');
+    expect(prompt).toContain('Reserve the final 30% for reporting');
+    expect(prompt).toContain('stop investigating');
+    expect(prompt).toContain('Never imply unchecked files are sound');
+  });
+
   it('omits pi-internal docs/themes/skills guidance irrelevant to a review', () => {
     const prompt = buildAgentSystemPrompt(makeInputs({ reviewMode: 'agent' }));
     expect(prompt).not.toContain('Pi documentation');
@@ -205,6 +214,20 @@ describe('buildUserPrompt', () => {
     expect(result).not.toContain('```diff');
     expect(result).toContain('file(s) not embedded — inspect with get_diff');
     expect(result).toContain('- huge.ts  (+5000 -0, modified)');
+  });
+
+  it('budgets UTF-8 bytes rather than characters for embedded agent diffs', () => {
+    const unicodeFile: ChangedFile = {
+      filename: 'unicode.ts',
+      status: 'added',
+      additions: 1,
+      deletions: 0,
+      lines: [{ type: 'add', newLine: 1, content: '😀'.repeat(15000) }],
+    };
+    const result = buildUserPrompt(mockPr, [unicodeFile], undefined, true);
+    expect(result).not.toContain('```diff');
+    expect(result).toContain('- unicode.ts');
+    expect(Buffer.byteLength(result, 'utf8')).toBeLessThan(40000);
   });
 
   it('standard mode embeds every diff regardless of size (API message, not argv)', () => {

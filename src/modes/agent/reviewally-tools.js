@@ -24,6 +24,8 @@ let diffsCache = null;
 const findings = [];
 const findingKeys = new Set();
 let finished = false;
+let wrapUpTimer;
+let finalizing = false;
 
 function loadDiffs() {
   if (diffsCache) return diffsCache;
@@ -154,6 +156,7 @@ const getDiffTool = {
     const page = lines.slice(offset - 1, end).map(renderLine).join('\n');
     const more = end < total;
     return {
+      details: undefined,
       content: [
         {
           type: 'text',
@@ -228,6 +231,7 @@ const submitFindingTool = {
   },
 
   async execute(_toolCallId, params) {
+    if (finished) throw new Error('The review is already complete; no more findings can be submitted.');
     if (findings.length >= MAX_FINDINGS) {
       throw new Error(`Finding limit reached (${MAX_FINDINGS}); do not submit more.`);
     }
@@ -266,6 +270,7 @@ const submitFindingTool = {
     findings.push(params);
     findingKeys.add(key);
     return {
+      details: undefined,
       content: [
         {
           type: 'text',
@@ -316,7 +321,9 @@ const finishReviewTool = {
       throw new Error('finish_review was already called; the review is complete.');
     }
     finished = true;
+    clearTimeout(wrapUpTimer);
     return {
+      details: undefined,
       content: [
         {
           type: 'text',
@@ -331,4 +338,27 @@ export default function (pi) {
   pi.registerTool(getDiffTool);
   pi.registerTool(submitFindingTool);
   pi.registerTool(finishReviewTool);
+
+  pi.on('session_start', () => {
+    const timeoutMs = Number(process.env.REVIEWALLY_TIMEOUT_MS);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
+    wrapUpTimer = setTimeout(() => {
+      if (finished || finalizing) return;
+      finalizing = true;
+      pi.setActiveTools(['submit_finding', 'finish_review']);
+      pi.setThinkingLevel('low');
+      pi.sendMessage(
+        {
+          customType: 'reviewally_budget',
+          content:
+            'The investigation budget is exhausted. Stop investigating now. Submit only findings you have already verified, then call finish_review immediately. Include the time budget and uninspected areas in limitations; do not claim full coverage. Do not give a prose-only answer instead of calling finish_review.',
+          display: false,
+        },
+        { deliverAs: 'steer', triggerTurn: true },
+      );
+    }, Math.floor(timeoutMs * 0.7));
+    wrapUpTimer.unref();
+  });
+  pi.on('agent_settled', () => clearTimeout(wrapUpTimer));
+  pi.on('session_shutdown', () => clearTimeout(wrapUpTimer));
 }

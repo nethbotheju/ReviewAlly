@@ -61,12 +61,16 @@ export function renderTraceLine(event: PiEvent, level: PiLogLevel = 'compact'): 
       if (typeof event.toolName !== 'string') return null;
       const status = event.isError ? 'ERROR' : 'ok';
       const size = humanBytes(toolResultSize(event.result));
+      const previewLimit = event.isError ? Math.max(caps.result, caps.text) : caps.result;
       const preview =
-        caps.result > 0 ? ` ${truncate(toolResultText(event.result), caps.result)}` : '';
+        previewLimit > 0 ? ` ${truncate(toolResultText(event.result), previewLimit)}` : '';
       return `${PREFIX} tool_result ${event.toolName} ${status} (${size})${preview}`;
     }
     case 'message_end': {
       const message = event.message;
+      if (message?.customType === 'reviewally_budget') {
+        return `${PREFIX} budget      investigation budget exhausted; wrapping up with reporting tools`;
+      }
       if (!message || message.role !== 'assistant') return null;
       if (message.errorMessage) {
         return `${PREFIX} error       ${truncate(message.errorMessage, caps.text)}`;

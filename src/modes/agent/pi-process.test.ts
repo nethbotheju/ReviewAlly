@@ -90,6 +90,17 @@ describe('invokePi', () => {
     expect(events.map((e) => e.type)).toEqual(['turn_start', 'tool_execution_start']);
   }, 10000);
 
+  it('escalates to SIGKILL if the child ignores SIGTERM', async () => {
+    const cliEntry = makeFakePi(`
+      process.on('SIGTERM', () => {});
+      console.log(JSON.stringify({ type: 'turn_start' }));
+      setInterval(() => {}, 1000);
+    `);
+    const result = await invokePi(cliEntry, [], os.tmpdir(), {}, 300);
+    expect(result.timedOut).toBe(true);
+    expect(result.events[0]?.type).toBe('turn_start');
+  }, 10000);
+
   it('streams every parsed event to the onEvent callback in order', async () => {
     const script = `
       console.log(JSON.stringify({ type: 'turn_start' }));

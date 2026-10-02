@@ -13,6 +13,7 @@ export interface PiUsage {
 
 export interface PiMessage {
   role: string;
+  customType?: string;
   content?: PiContentPart[] | string;
   usage?: PiUsage;
   stopReason?: string;

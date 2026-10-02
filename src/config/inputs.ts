@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import type { PiLogLevel, PiThinkingLevel, RawActionInputs } from './types';
 
-const DEFAULT_PI_VERSION = '0.82.1';
+const DEFAULT_PI_VERSION = '1.0.0';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
 const PI_LOG_LEVELS: readonly PiLogLevel[] = ['off', 'compact', 'full'];
@@ -76,7 +76,7 @@ export function getRawInputs(): RawActionInputs {
   const piVersion = optionalInput('pi-version') ?? DEFAULT_PI_VERSION;
   if (!VERSION_PATTERN.test(piVersion)) {
     throw new Error(
-      `Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 0.82.1, latest).`,
+      `Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 1.0.0, latest).`,
     );
   }
 

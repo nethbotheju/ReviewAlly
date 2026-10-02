@@ -34,6 +34,7 @@ export interface AgentReviewFormatInput {
   uncompletedCalls: number;
   /** True when the pi run hit the hard timeout before finishing. */
   timedOut?: boolean;
+  budgetLimited?: boolean;
   headSha: string;
   /** Inline findings are only posted when the reviewed head is still current. */
   postInline: boolean;
@@ -150,6 +151,7 @@ function statusLine(input: AgentReviewFormatInput): string {
   if (input.status === 'partial') {
     const reasons: string[] = [];
     if (input.timedOut) reasons.push('the agent run hit the hard timeout');
+    if (input.budgetLimited) reasons.push('the investigation time budget was exhausted');
     if (!input.finish) reasons.push('the agent did not call finish_review');
     if (input.uncompletedCalls > 0) {
       reasons.push(`${input.uncompletedCalls} tool call(s) were interrupted`);

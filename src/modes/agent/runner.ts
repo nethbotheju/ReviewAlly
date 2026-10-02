@@ -18,6 +18,7 @@ export interface AgentRunResult extends ReviewResult {
   toolCalls: AgentToolCalls;
   /** True when pi hit the hard timeout; the run is a partial review at best. */
   timedOut: boolean;
+  budgetLimited: boolean;
 }
 
 /**
@@ -49,7 +50,11 @@ export async function runAgentReview(
     const diffsFile = path.join(configDir, DIFFS_FILE);
     fs.writeFileSync(diffsFile, JSON.stringify(buildDiffsPayload(fetch)));
 
-    const args = buildPiArgs(systemPrompt, userPrompt, inputs, extensionPath);
+    const systemPromptFile = path.join(configDir, 'system-prompt.txt');
+    const userPromptFile = path.join(configDir, 'user-prompt.txt');
+    fs.writeFileSync(systemPromptFile, systemPrompt);
+    fs.writeFileSync(userPromptFile, userPrompt);
+    const args = buildPiArgs(systemPromptFile, `@${userPromptFile}`, inputs, extensionPath);
     const env = buildPiEnv(inputs, configDir, diffsFile);
 
     core.info(
@@ -101,7 +106,15 @@ export async function runAgentReview(
       }
     }
 
-    return { ...base, toolCalls, timedOut };
+    const budgetLimited = events.some(
+      (event) => event.type === 'message_end' && event.message?.customType === 'reviewally_budget',
+    );
+    if (budgetLimited) {
+      core.warning(
+        'pi investigation budget exhausted — posting a partial review with recorded results.',
+      );
+    }
+    return { ...base, toolCalls, timedOut, budgetLimited };
   } finally {
     try {
       fs.rmSync(configDir, { recursive: true, force: true });

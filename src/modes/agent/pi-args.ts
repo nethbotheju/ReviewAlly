@@ -11,6 +11,7 @@ export const PI_CUSTOM_API_KEY_ENV = 'CUSTOM_API_KEY';
 
 /** Env var pointing the ReviewAlly tools extension at the PR patch data. */
 export const PI_DIFFS_FILE_ENV = 'REVIEWALLY_DIFFS_FILE';
+export const PI_TIMEOUT_ENV = 'REVIEWALLY_TIMEOUT_MS';
 
 /** Headless, ephemeral, read-only flags. Reused across runs and asserted by tests. */
 const PI_FLAGS = [
@@ -18,7 +19,6 @@ const PI_FLAGS = [
   '--no-session', // ephemeral; never persist
   '--mode',
   'json', // JSONL event stream on stdout
-  '--offline', // no startup network (update checks / telemetry) — does not block the model call
   '--no-extensions', // discovered extensions stay off; the ReviewAlly extension loads explicitly
   '--no-skills',
   '--no-prompt-templates',
@@ -137,6 +137,8 @@ export function buildPiEnv(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     PI_CODING_AGENT_DIR: configDir,
+    PI_OFFLINE: '0',
+    [PI_TIMEOUT_ENV]: String(inputs.piTimeoutMs),
   };
   if (diffsFile) {
     env[PI_DIFFS_FILE_ENV] = diffsFile;

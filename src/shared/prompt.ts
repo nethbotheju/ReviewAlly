@@ -72,6 +72,10 @@ Guidelines:
 - Use get_diff to see the exact base-to-head patch for a changed file before anchoring findings; large diffs may not be embedded in the prompt, but every changed file is fully inspectable with get_diff.
 - Before recording a finding, verify it by reading the relevant file. Do not report a problem you have not confirmed in the code.
 - Only submit findings for defects introduced or exposed by this PR, not pre-existing issues unrelated to the change. Anchor each to an added line of the file it concerns, and cite evidence you actually inspected (evidencePath/evidenceLine must exist in the repository snapshot).
+- Submit each verified finding immediately; do not hold all findings until a final sweep.
+- Prioritize changed runtime behavior and security boundaries. Inspect related tests and documentation when needed to verify a concern, not as an exhaustive second pass.
+- Diffs already embedded in the prompt do not need to be fetched again unless you need exact old-line numbers or more context. Use targeted read ranges and batch independent investigations.
+- The run has a hard time limit of ${Math.ceil(inputs.piTimeoutMs / 1000)} seconds. Reserve the final 30% for reporting. If the harness announces that the investigation budget is exhausted, stop investigating, submit only already-verified findings, and call finish_review immediately with explicit coverage limitations. Never imply unchecked files are sound.
 - Do not pad the review: if nothing meets the bar, submit no findings and say so in finish_review.
 - Be concise. Show file paths clearly when referencing files.`;
 
@@ -97,12 +101,7 @@ export interface PromptContext {
   tree?: string;
 }
 
-/**
- * Byte budget for embedded diff excerpts in agent mode. The prompt travels as
- * a single pi CLI argument, and Linux caps one argument at ~128KB
- * (MAX_ARG_STRLEN) — spawn fails with E2BIG beyond that. Files over budget are
- * listed and deferred to get_diff, which serves every changed file.
- */
+/** Byte budget for embedded diff excerpts; larger patches remain available via get_diff. */
 const AGENT_DIFF_BUDGET_BYTES = 40_000;
 
 export function buildUserPrompt(
@@ -114,7 +113,7 @@ export function buildUserPrompt(
   const parts: string[] = [];
   if (isAgent) {
     parts.push(
-      "Review the pull request below. Investigate the repository with your tools as needed, use get_diff to inspect any changed file's patch (files whose diff is not embedded below must be inspected with get_diff), record each verified defect with submit_finding, and complete the review by calling finish_review exactly once. Your final message is a brief prose wrap-up, not JSON.",
+      "Review the pull request below. Investigate the repository with your tools as needed, use get_diff to inspect any changed file's patch (prioritize unembedded runtime changes; disclose any uninspected files as limitations), record each verified defect with submit_finding, and complete the review by calling finish_review exactly once. Your final message is a brief prose wrap-up, not JSON.",
     );
     parts.push('');
   }
@@ -155,13 +154,14 @@ export function buildUserPrompt(
   let budget = isAgent ? AGENT_DIFF_BUDGET_BYTES : Number.POSITIVE_INFINITY;
   for (const file of files) {
     const rendered = renderFile(file);
-    if (rendered.length > budget) {
+    const bytes = Buffer.byteLength(rendered, 'utf8');
+    if (bytes > budget) {
       deferred.push(file);
       continue;
     }
     parts.push(rendered);
     parts.push('');
-    budget -= rendered.length;
+    budget -= bytes;
   }
   if (deferred.length > 0) {
     parts.push(`### ${deferred.length} file(s) not embedded — inspect with get_diff`);

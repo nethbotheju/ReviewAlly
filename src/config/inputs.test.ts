@@ -64,7 +64,7 @@ describe('getRawInputs', () => {
       maxDiffLines: 3000,
       useDefaultExcludes: true,
       agentTarballMaxMb: 200,
-      piVersion: '0.82.1',
+      piVersion: '1.0.0',
       piTimeoutMs: 600000,
       apiType: undefined,
       baseUrl: undefined,
