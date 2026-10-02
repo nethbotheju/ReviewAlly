@@ -78,11 +78,44 @@ describe('invokePi', () => {
     );
   });
 
-  it('rejects on timeout when the fake CLI hangs', async () => {
-    const script = `setInterval(() => {}, 1000);`;
+  it('resolves with partial events and timedOut=true when the fake CLI hangs', async () => {
+    const script = `
+      console.log(JSON.stringify({ type: 'turn_start' }));
+      console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'get_diff', args: { path: 'a.ts' } }));
+      setInterval(() => {}, 1000);
+    `;
     const cliEntry = makeFakePi(script);
-    await expect(invokePi(cliEntry, [], os.tmpdir(), {}, 300)).rejects.toThrow(/timed out/);
+    const { events, timedOut } = await invokePi(cliEntry, [], os.tmpdir(), {}, 300);
+    expect(timedOut).toBe(true);
+    expect(events.map((e) => e.type)).toEqual(['turn_start', 'tool_execution_start']);
   }, 10000);
+
+  it('escalates to SIGKILL if the child ignores SIGTERM', async () => {
+    const cliEntry = makeFakePi(`
+      process.on('SIGTERM', () => {});
+      console.log(JSON.stringify({ type: 'turn_start' }));
+      setInterval(() => {}, 1000);
+    `);
+    const result = await invokePi(cliEntry, [], os.tmpdir(), {}, 300);
+    expect(result.timedOut).toBe(true);
+    expect(result.events[0]?.type).toBe('turn_start');
+  }, 10000);
+
+  it('streams every parsed event to the onEvent callback in order', async () => {
+    const script = `
+      console.log(JSON.stringify({ type: 'turn_start' }));
+      console.log(JSON.stringify({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'get_diff', args: { path: 'a.ts' } }));
+      console.log(JSON.stringify({ type: 'tool_execution_end', toolCallId: 'c1', toolName: 'get_diff', isError: false }));
+      console.log(JSON.stringify({ type: 'agent_end', messages: [] }));
+    `;
+    const cliEntry = makeFakePi(script);
+    const seen: string[] = [];
+    const { events } = await invokePi(cliEntry, [], os.tmpdir(), {}, 5000, (e) =>
+      seen.push(e.type),
+    );
+    expect(seen).toEqual(events.map((e) => e.type));
+    expect(seen).toEqual(['turn_start', 'tool_execution_start', 'tool_execution_end', 'agent_end']);
+  });
 
   it('passes the working directory and environment to the child', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'invoke-pi-'));

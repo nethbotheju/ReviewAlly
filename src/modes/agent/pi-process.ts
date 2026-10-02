@@ -2,7 +2,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import * as core from '@actions/core';
 import { PI_PACKAGE } from './pi-args';
 import type { PiEvent } from './pi-types';
@@ -77,8 +76,11 @@ export function runNpm(args: string[], cwd: string): Promise<void> {
 
 /**
  * Spawn the pi CLI, stream its JSONL stdout into parsed events, and resolve on
- * completion. Enforces a hard timeout (SIGTERM then SIGKILL). Rejects if the
- * process produces no events and exits non-zero, or if it times out.
+ * completion. Enforces a hard timeout (SIGTERM then SIGKILL). `onEvent`, when
+ * given, receives every parsed event in order (live trace). On timeout the
+ * promise RESOLVES with the partial events and `timedOut: true` so the caller
+ * can still use and log what happened before the kill. Rejects only if the
+ * process produces no events and exits non-zero, or fails to spawn.
  */
 export function invokePi(
   cliEntry: string,
@@ -86,7 +88,8 @@ export function invokePi(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Promise<{ events: PiEvent[]; stderr: string }> {
+  onEvent?: (event: PiEvent) => void,
+): Promise<{ events: PiEvent[]; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const events: PiEvent[] = [];
     let stderr = '';
@@ -103,19 +106,37 @@ export function invokePi(
       timedOut = true;
       child.kill('SIGTERM');
       killTimer = setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL');
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
       }, SIGKILL_DELAY_MS);
     }, timeoutMs);
 
-    const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
-    rl.on('line', (line) => {
+    // JSONL records are LF-terminated. Node's readline also treats U+2028/U+2029
+    // as line separators, which can corrupt records whose JSON strings contain
+    // those characters (e.g. model-authored tool arguments), so split on LF only.
+    const handleLine = (line: string) => {
       const trimmed = line.trim();
       if (!trimmed.startsWith('{')) return;
       try {
         const parsed: unknown = JSON.parse(trimmed);
-        if (isPiEvent(parsed)) events.push(parsed);
+        if (isPiEvent(parsed)) {
+          events.push(parsed);
+          onEvent?.(parsed);
+        }
       } catch {
         /* skip non-JSON lines */
+      }
+    };
+
+    let buffer = '';
+    child.stdout!.setEncoding('utf-8');
+    child.stdout!.on('data', (chunk: string) => {
+      buffer += chunk;
+      let idx = buffer.indexOf('\n');
+      while (idx !== -1) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        handleLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+        idx = buffer.indexOf('\n');
       }
     });
 
@@ -133,8 +154,9 @@ export function invokePi(
     child.on('close', (code) => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      if (buffer.trim()) handleLine(buffer);
       if (timedOut) {
-        reject(new Error(`pi review timed out after ${timeoutMs}ms.`));
+        resolve({ events, stderr, timedOut: true });
         return;
       }
       if (code !== 0) {
@@ -150,7 +172,7 @@ export function invokePi(
           );
         }
       }
-      resolve({ events, stderr });
+      resolve({ events, stderr, timedOut: false });
     });
   });
 }

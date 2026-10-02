@@ -41,11 +41,11 @@ inputs:
     required: false
 
   max-files:
-    description: 'Maximum number of changed files to review per run.'
+    description: 'Maximum number of changed files to review per run (standard mode only; agent mode reviews all changed files).'
     required: false
     default: '20'
   max-diff-lines:
-    description: 'Maximum total added lines to review per run (protects token budget).'
+    description: 'Maximum total added lines to review per run, protecting the token budget (standard mode only; agent mode reads diffs on demand via get_diff).'
     required: false
     default: '3000'
   use-default-excludes:
@@ -62,13 +62,21 @@ inputs:
     required: false
     default: '200'
   pi-version:
-    description: 'Version of @earendil-works/pi-coding-agent to install for agent mode (e.g. 0.82.1, latest).'
+    description: 'Version of @earendil-works/pi-coding-agent to install for agent mode (e.g. 1.0.0, latest).'
     required: false
-    default: '0.82.1'
+    default: '1.0.0'
   pi-timeout-ms:
     description: 'Hard timeout in milliseconds for a pi-engine review run. Guards against runaway loops since pi has no built-in step cap.'
     required: false
     default: '600000'
+  pi-log:
+    description: "Agent-mode run visibility in the Actions log: off, compact (one line per tool call / message), or full (larger previews). The raw JSONL transcript is always saved to RUNNER_TEMP and dumped in a collapsed group on failure."
+    required: false
+    default: 'compact'
+  pi-thinking:
+    description: "Agent-mode thinking level passed to pi (off, minimal, low, medium, high, xhigh, max). Set low (or higher) when the model cannot disable reasoning — otherwise it runs at the provider's default effort, which can dominate run time."
+    required: false
+    default: 'off'
 
 outputs:
   summary:

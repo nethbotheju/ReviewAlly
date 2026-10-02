@@ -28,6 +28,7 @@ jobs:
         with:
           app-token-url: https://api.reviewally.nethbotheju.dev/token
           api-key: ${{ secrets.REVIEWALLY_API_KEY }}
+          pi-thinking: low
         env:
           REVIEWALLY_API_TYPE: ${{ vars.REVIEWALLY_API_TYPE }}
           REVIEWALLY_BASE_URL: ${{ vars.REVIEWALLY_BASE_URL }}
@@ -37,3 +38,10 @@ jobs:
           REVIEWALLY_EXTRA_INSTRUCTIONS: ${{ vars.REVIEWALLY_EXTRA_INSTRUCTIONS }}
           REVIEWALLY_CONTEXT_DOCS: ${{ vars.REVIEWALLY_CONTEXT_DOCS }}
           REVIEWALLY_EXCLUDE_PATTERNS: ${{ vars.REVIEWALLY_EXCLUDE_PATTERNS }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pi-transcript
+          path: ${{ runner.temp }}/pi-transcript.jsonl
+          if-no-files-found: ignore
+          retention-days: 7

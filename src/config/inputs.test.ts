@@ -17,6 +17,8 @@ const OPTIONAL_DEFAULTS: Record<string, string> = {
   'INPUT_AGENT-TARBALL-MAX-MB': '',
   'INPUT_PI-VERSION': '',
   'INPUT_PI-TIMEOUT-MS': '',
+  'INPUT_PI-LOG': '',
+  'INPUT_PI-THINKING': '',
   'INPUT_API-TYPE': '',
   'INPUT_BASE-URL': '',
   INPUT_MODEL: '',
@@ -62,7 +64,7 @@ describe('getRawInputs', () => {
       maxDiffLines: 3000,
       useDefaultExcludes: true,
       agentTarballMaxMb: 200,
-      piVersion: '0.82.1',
+      piVersion: '1.0.0',
       piTimeoutMs: 600000,
       apiType: undefined,
       baseUrl: undefined,
@@ -98,6 +100,29 @@ describe('getRawInputs', () => {
   it('throws on non-numeric pi-timeout-ms', () => {
     setEnv({ 'INPUT_PI-TIMEOUT-MS': 'forever' });
     expect(() => getRawInputs()).toThrow(/Invalid pi-timeout-ms/);
+  });
+
+  it('defaults pi-log to compact and accepts the three levels case-insensitively', () => {
+    setEnv();
+    expect(getRawInputs().piLog).toBe('compact');
+    for (const raw of ['off', 'COMPACT', 'full'] as const) {
+      setEnv({ 'INPUT_PI-LOG': raw });
+      expect(getRawInputs().piLog).toBe(raw.toLowerCase());
+    }
+  });
+
+  it('throws on an unknown pi-log value', () => {
+    setEnv({ 'INPUT_PI-LOG': 'verbose' });
+    expect(() => getRawInputs()).toThrow(/Invalid pi-log/);
+  });
+
+  it('defaults pi-thinking to off and validates the level', () => {
+    setEnv();
+    expect(getRawInputs().piThinking).toBe('off');
+    setEnv({ 'INPUT_PI-THINKING': 'LOW' });
+    expect(getRawInputs().piThinking).toBe('low');
+    setEnv({ 'INPUT_PI-THINKING': 'turbo' });
+    expect(() => getRawInputs()).toThrow(/Invalid pi-thinking/);
   });
 
   it('throws on pi-version with shell metacharacters', () => {

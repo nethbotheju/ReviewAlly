@@ -30982,9 +30982,19 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getRawInputs = getRawInputs;
 const core = __importStar(__nccwpck_require__(7484));
-const DEFAULT_PI_VERSION = '0.82.1';
+const DEFAULT_PI_VERSION = '1.0.0';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
+const PI_LOG_LEVELS = ['off', 'compact', 'full'];
+const PI_THINKING_LEVELS = [
+    'off',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+];
 function parseIntInput(name, fallback) {
     const raw = core.getInput(name).trim();
     if (raw === '')
@@ -30998,6 +31008,26 @@ function parseIntInput(name, fallback) {
 function optionalInput(name) {
     const raw = core.getInput(name).trim();
     return raw === '' ? undefined : raw;
+}
+function parsePiLogLevel() {
+    const raw = optionalInput('pi-log')?.toLowerCase();
+    if (raw === undefined)
+        return 'compact';
+    const level = PI_LOG_LEVELS.find((l) => l === raw);
+    if (!level) {
+        throw new Error(`Invalid pi-log '${raw}'. Must be one of: off, compact, full.`);
+    }
+    return level;
+}
+function parsePiThinking() {
+    const raw = optionalInput('pi-thinking')?.toLowerCase();
+    if (raw === undefined)
+        return 'off';
+    const level = PI_THINKING_LEVELS.find((l) => l === raw);
+    if (!level) {
+        throw new Error(`Invalid pi-thinking '${raw}'. Must be one of: off, minimal, low, medium, high, xhigh, max.`);
+    }
+    return level;
 }
 function getRawInputs() {
     const apiKey = core.getInput('api-key', { required: true });
@@ -31019,7 +31049,7 @@ function getRawInputs() {
     }
     const piVersion = optionalInput('pi-version') ?? DEFAULT_PI_VERSION;
     if (!VERSION_PATTERN.test(piVersion)) {
-        throw new Error(`Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 0.82.1, latest).`);
+        throw new Error(`Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 1.0.0, latest).`);
     }
     return {
         apiType: optionalInput('api-type'),
@@ -31038,6 +31068,8 @@ function getRawInputs() {
         agentTarballMaxMb: parseIntInput('agent-tarball-max-mb', 200),
         piVersion,
         piTimeoutMs: parseIntInput('pi-timeout-ms', 600000),
+        piLog: parsePiLogLevel(),
+        piThinking: parsePiThinking(),
     };
 }
 
@@ -31167,6 +31199,8 @@ function resolveInputs(raw, vars) {
         contextDocs: contextDocs.length > 0 ? contextDocs : DEFAULT_CONTEXT_DOCS,
         piVersion: raw.piVersion,
         piTimeoutMs: raw.piTimeoutMs,
+        piLog: raw.piLog ?? 'compact',
+        piThinking: raw.piThinking ?? 'off',
     };
     return { inputs, sources };
 }
@@ -31244,6 +31278,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.fetchPullRequest = fetchPullRequest;
 exports.fetchChangedFiles = fetchChangedFiles;
+exports.applyDiffBudget = applyDiffBudget;
 exports.downloadTarball = downloadTarball;
 exports.fetchFileContents = fetchFileContents;
 exports.postReview = postReview;
@@ -31278,26 +31313,16 @@ async function fetchChangedFiles(octokit, owner, repo, pullNumber, inputs) {
             return false;
         return true;
     });
-    const selected = [];
-    let addedLines = 0;
-    let truncated = false;
-    let truncatedReason;
-    for (const file of candidates) {
-        if (selected.length >= inputs.maxFiles) {
-            truncated = true;
-            truncatedReason = `Reached max-files limit (${inputs.maxFiles})`;
-            break;
-        }
-        const nextTotal = addedLines + file.additions;
-        if (nextTotal > inputs.maxDiffLines && selected.length > 0) {
-            truncated = true;
-            truncatedReason = `Reached max-diff-lines limit (${inputs.maxDiffLines})`;
-            break;
-        }
-        addedLines = nextTotal;
-        selected.push(file);
-    }
-    const files = selected.map((f) => ({
+    // Agent mode reads diffs on demand via the get_diff tool (never the
+    // prompt), so every candidate file stays inspectable. Standard mode embeds
+    // the diff in the prompt and keeps the size budget.
+    const budgeted = inputs.reviewMode === 'agent'
+        ? { files: candidates, truncated: false, truncatedReason: undefined }
+        : applyDiffBudget(candidates, {
+            maxFiles: inputs.maxFiles,
+            maxDiffLines: inputs.maxDiffLines,
+        });
+    const files = budgeted.files.map((f) => ({
         filename: f.filename,
         status: f.status,
         additions: f.additions,
@@ -31309,9 +31334,38 @@ async function fetchChangedFiles(octokit, owner, repo, pullNumber, inputs) {
         files,
         totalFiles: all.length,
         reviewedFiles: files.length,
-        truncated,
-        truncatedReason,
+        truncated: budgeted.truncated,
+        truncatedReason: budgeted.truncatedReason,
     };
+}
+/**
+ * Apply the standard-mode selection budget: stop before the file that would
+ * exceed either cap. A single oversized first file is still included so the
+ * review never ends up empty.
+ */
+function applyDiffBudget(items, budget) {
+    const files = [];
+    let addedLines = 0;
+    for (const item of items) {
+        if (files.length >= budget.maxFiles) {
+            return {
+                files,
+                truncated: true,
+                truncatedReason: `Reached max-files limit (${budget.maxFiles})`,
+            };
+        }
+        const nextTotal = addedLines + item.additions;
+        if (nextTotal > budget.maxDiffLines && files.length > 0) {
+            return {
+                files,
+                truncated: true,
+                truncatedReason: `Reached max-diff-lines limit (${budget.maxDiffLines})`,
+            };
+        }
+        addedLines = nextTotal;
+        files.push(item);
+    }
+    return { files, truncated: false };
 }
 /**
  * Download a repo tarball at a ref via the octokit client (GHE-aware).
@@ -31585,6 +31639,8 @@ const format_1 = __nccwpck_require__(6338);
 const runner_1 = __nccwpck_require__(6164);
 const models_1 = __nccwpck_require__(796);
 const runner_2 = __nccwpck_require__(8810);
+const format_2 = __nccwpck_require__(1011);
+const validate_1 = __nccwpck_require__(8778);
 const snapshot_1 = __nccwpck_require__(9244);
 async function run() {
     let repoRoot;
@@ -31648,6 +31704,16 @@ async function run() {
                 if (err instanceof snapshot_1.RepoTooLargeError) {
                     core.warning(err.message);
                     useAgent = false;
+                    // The selection was uncapped for agent mode; re-apply the standard
+                    // budget so the degraded prompt stays bounded.
+                    const budgeted = (0, api_1.applyDiffBudget)(fetchResult.files, {
+                        maxFiles: inputs.maxFiles,
+                        maxDiffLines: inputs.maxDiffLines,
+                    });
+                    fetchResult.files = budgeted.files;
+                    fetchResult.reviewedFiles = budgeted.files.length;
+                    fetchResult.truncated = fetchResult.truncated || budgeted.truncated;
+                    fetchResult.truncatedReason = budgeted.truncatedReason ?? fetchResult.truncatedReason;
                 }
                 else {
                     throw err;
@@ -31662,23 +31728,66 @@ async function run() {
             : (0, prompt_1.buildSystemPrompt)(promptInputs);
         const userPrompt = (0, prompt_1.buildUserPrompt)(pr, fetchResult.files, { docs: contextDocs, tree }, useAgent);
         // Run review
-        const reviewResult = useAgent && repoRoot
-            ? await (0, runner_2.runAgentReview)(systemPrompt, userPrompt, repoRoot, inputs)
+        const agentResult = useAgent && repoRoot
+            ? await (0, runner_2.runAgentReview)(systemPrompt, userPrompt, repoRoot, inputs, fetchResult)
+            : undefined;
+        const reviewResult = agentResult
+            ? agentResult
             : await (0, runner_1.runStandardReview)((0, models_1.createModel)(inputs), systemPrompt, userPrompt);
         core.info(`Review done. tokens in=${reviewResult.inputTokens} out=${reviewResult.outputTokens} tot=${reviewResult.totalTokens} steps=${reviewResult.steps}`);
-        // Parse, format, post
-        modelResponse = reviewResult.text;
-        const doc = (0, parse_1.parseReview)(reviewResult.text, {
-            onRepair: () => {
-                repaired = true;
-            },
-        });
-        const body = (0, format_1.formatReview)(doc, fetchResult.files);
-        await (0, api_1.postReview)(octokit, owner, repo, pullNumber, pr.headSha, body, []);
-        if (repaired) {
-            core.warning((0, format_1.formatRepairWarning)(reviewResult.text));
+        if (agentResult && repoRoot) {
+            modelResponse = agentResult.text;
+            // The PR must not have moved while the agent ran: inline findings anchor
+            // to the reviewed head, so a stale head posts no inline comments.
+            const current = await (0, api_1.fetchPullRequest)(octokit, owner, repo, pullNumber);
+            const stale = current.headSha !== pr.headSha;
+            if (stale) {
+                core.warning(`PR head moved during the review (${pr.headSha.slice(0, 8)} → ${current.headSha.slice(0, 8)}); posting a partial review without inline findings.`);
+            }
+            const toolCalls = agentResult.toolCalls;
+            const status = stale
+                ? 'stale'
+                : toolCalls.finish && !agentResult.timedOut && !agentResult.budgetLimited
+                    ? 'completed'
+                    : 'partial';
+            const validation = (0, validate_1.validateAgentFindings)(toolCalls, fetchResult.files, repoRoot.path);
+            const formatted = (0, format_2.formatAgentReview)({
+                status,
+                finish: toolCalls.finish,
+                validFindings: validation.valid,
+                rejected: validation.rejected,
+                capped: validation.capped,
+                files: fetchResult.files,
+                inspectedPaths: toolCalls.inspectedPaths,
+                selectionTruncated: fetchResult.truncated,
+                truncatedReason: fetchResult.truncatedReason,
+                toolErrors: toolCalls.toolErrors,
+                uncompletedCalls: toolCalls.uncompletedCalls,
+                timedOut: agentResult.timedOut,
+                budgetLimited: agentResult.budgetLimited,
+                headSha: pr.headSha,
+                postInline: !stale,
+            });
+            await (0, api_1.postReview)(octokit, owner, repo, pullNumber, pr.headSha, formatted.body, formatted.comments);
+            core.setOutput('summary', toolCalls.finish?.summary || 'Agent review posted.');
+            core.info(`Posted agent review: status=${status}, ${formatted.comments.length} inline finding(s), ` +
+                `${validation.rejected.length} rejected.`);
         }
-        core.setOutput('summary', doc.solution || doc.background);
+        else {
+            // Parse, format, post
+            modelResponse = reviewResult.text;
+            const doc = (0, parse_1.parseReview)(reviewResult.text, {
+                onRepair: () => {
+                    repaired = true;
+                },
+            });
+            const body = (0, format_1.formatReview)(doc, fetchResult.files);
+            await (0, api_1.postReview)(octokit, owner, repo, pullNumber, pr.headSha, body, []);
+            if (repaired) {
+                core.warning((0, format_1.formatRepairWarning)(reviewResult.text));
+            }
+            core.setOutput('summary', doc.solution || doc.background);
+        }
         core.info('Posted review.');
         if (commentId)
             await (0, api_1.reactToComment)(octokit, owner, repo, commentId, '+1');
@@ -31709,13 +31818,184 @@ run();
 
 /***/ }),
 
+/***/ 2929:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.EXTENSION_SOURCE_B64 = void 0;
+exports.extensionSource = extensionSource;
+/**
+ * Embedded copy of reviewally-tools.js (the pi extension for agent mode).
+ *
+ * ncc does not reliably bundle __dirname-relative file assets, so the extension
+ * source travels as base64 inside the bundle and is written to the ephemeral
+ * pi config dir at runtime. reviewally-tools.js stays the canonical file; if
+ * you edit it, regenerate this constant with:
+ *
+ *   node -e "process.stdout.write(require('fs').readFileSync('src/modes/agent/reviewally-tools.js').toString('base64'))"
+ *
+ * reviewally-tools.test.ts fails when the two drift apart.
+ */
+exports.EXTENSION_SOURCE_B64 = 'LyoqCiAqIFJldmlld0FsbHkgcGkgZXh0ZW5zaW9uOiByZXZpZXctb3duZWQgdG9vbHMgZm9yIGFnZW50IG1vZGUuCiAqCiAqIExvYWRlZCBleHBsaWNpdGx5IHZpYSBgcGkgLS1leHRlbnNpb24gPHBhdGg+YCAocnVucyBpbnNpZGUgdGhlIHBpIHByb2Nlc3MpLgogKiBUaGUgUFIgcGF0Y2ggZGF0YSBpcyBwcm92aWRlZCBieSB0aGUgaG9zdCB0aHJvdWdoIFJFVklFV0FMTFlfRElGRlNfRklMRTsgdGhlCiAqIHRvb2wgY2FsbHMgdGhlbXNlbHZlcyBhcmUgY29sbGVjdGVkIGZyb20gdGhlIENMSSBKU09OTCBldmVudCBzdHJlYW0gYnkgdGhlCiAqIGhvc3QsIHdoaWNoIHJlLXZhbGlkYXRlcyBldmVyeXRoaW5nIGJlZm9yZSBwb3N0aW5nIHRvIEdpdEh1Yi4KICoKICogWmVybyBydW50aW1lIGRlcGVuZGVuY2llczogVHlwZUJveCBhY2NlcHRzIHBsYWluLW9iamVjdCBKU09OIHNjaGVtYXMsIHNvIHRoZQogKiBleHRlbnNpb24gbmVlZHMgbm8gaW1wb3J0cyBiZXlvbmQgbm9kZSBidWlsdGlucyBhbmQgY2FuIGxpdmUgYW55d2hlcmUuCiAqLwppbXBvcnQgKiBhcyBmcyBmcm9tICdub2RlOmZzJzsKCmV4cG9ydCBjb25zdCBESUZGU19GSUxFX0VOViA9ICdSRVZJRVdBTExZX0RJRkZTX0ZJTEUnOwoKY29uc3QgUEFHRV9TSVpFID0gMjAwOwpjb25zdCBNQVhfRklORElOR1MgPSAyNTsKY29uc3QgTUFYX0xJTkVfQ0hBUlMgPSA1MDA7CmNvbnN0IE1BWF9MSVNURURfUEFUSFMgPSA1MDsKLyoqIE1pcnJvcnMgdGhlIGhvc3QgdmFsaWRhdG9yOiBmaWxlcyBsYXJnZXIgdGhhbiB0aGlzIHNraXAgdGhlIGxpbmUtcmFuZ2UgY2hlY2suICovCmNvbnN0IE1BWF9FVklERU5DRV9CWVRFUyA9IDUgKiAxMDI0ICogMTAyNDsKCmxldCBkaWZmc0NhY2hlID0gbnVsbDsKY29uc3QgZmluZGluZ3MgPSBbXTsKY29uc3QgZmluZGluZ0tleXMgPSBuZXcgU2V0KCk7CmxldCBmaW5pc2hlZCA9IGZhbHNlOwpsZXQgd3JhcFVwVGltZXI7CmxldCBmaW5hbGl6aW5nID0gZmFsc2U7CgpmdW5jdGlvbiBsb2FkRGlmZnMoKSB7CiAgaWYgKGRpZmZzQ2FjaGUpIHJldHVybiBkaWZmc0NhY2hlOwogIGNvbnN0IGZpbGUgPSBwcm9jZXNzLmVudltESUZGU19GSUxFX0VOVl07CiAgaWYgKCFmaWxlKSB7CiAgICB0aHJvdyBuZXcgRXJyb3IoYGdldF9kaWZmIGlzIHVuYXZhaWxhYmxlOiAke0RJRkZTX0ZJTEVfRU5WfSBpcyBub3Qgc2V0IGZvciB0aGlzIHJldmlldy5gKTsKICB9CiAgdHJ5IHsKICAgIGRpZmZzQ2FjaGUgPSBKU09OLnBhcnNlKGZzLnJlYWRGaWxlU3luYyhmaWxlLCAndXRmOCcpKTsKICB9IGNhdGNoIChlcnIpIHsKICAgIHRocm93IG5ldyBFcnJvcihgZ2V0X2RpZmYgZmFpbGVkIHRvIGxvYWQgdGhlIHJldmlldyBkaWZmIGRhdGE6ICR7ZXJyLm1lc3NhZ2V9YCk7CiAgfQogIHJldHVybiBkaWZmc0NhY2hlOwp9CgpmdW5jdGlvbiBmaW5kRmlsZShwYXRoKSB7CiAgY29uc3QgZGF0YSA9IGxvYWREaWZmcygpOwogIHJldHVybiAoZGF0YS5maWxlcyB8fCBbXSkuZmluZCgoZikgPT4gZi5wYXRoID09PSBwYXRoKSB8fCBudWxsOwp9CgpmdW5jdGlvbiByZW5kZXJMaW5lKGwpIHsKICBjb25zdCBvbGQgPSBTdHJpbmcobC5vbGRMaW5lID8/ICcnKS5wYWRTdGFydCg2KTsKICBjb25zdCBudyA9IFN0cmluZyhsLm5ld0xpbmUgPz8gJycpLnBhZFN0YXJ0KDYpOwogIGNvbnN0IG1hcmsgPSBsLnR5cGUgPT09ICdhZGQnID8gJysnIDogbC50eXBlID09PSAnZGVsZXRlJyA/ICctJyA6ICcgJzsKICBjb25zdCBjb250ZW50ID0KICAgIGwuY29udGVudC5sZW5ndGggPiBNQVhfTElORV9DSEFSUyA/IGAke2wuY29udGVudC5zbGljZSgwLCBNQVhfTElORV9DSEFSUyl94oCmYCA6IGwuY29udGVudDsKICByZXR1cm4gYCR7b2xkfSAke253fSAke21hcmt9ICR7Y29udGVudH1gOwp9CgovKiogTGluZSBjb3VudCBvZiBhIHNuYXBzaG90IGZpbGUsIG1pcnJvcmluZyB0aGUgaG9zdCB2YWxpZGF0b3IncyBzZW1hbnRpY3MuICovCmZ1bmN0aW9uIHNuYXBzaG90TGluZUNvdW50KHJlbFBhdGgpIHsKICBsZXQgc3RhdDsKICB0cnkgewogICAgc3RhdCA9IGZzLnN0YXRTeW5jKHJlbFBhdGgpOwogIH0gY2F0Y2ggewogICAgcmV0dXJuIG51bGw7CiAgfQogIGlmICghc3RhdC5pc0ZpbGUoKSB8fCBzdGF0LnNpemUgPiBNQVhfRVZJREVOQ0VfQllURVMpIHJldHVybiAwOwogIGNvbnN0IGNvbnRlbnQgPSBmcy5yZWFkRmlsZVN5bmMocmVsUGF0aCwgJ3V0ZjgnKTsKICBpZiAoY29udGVudC5sZW5ndGggPT09IDApIHJldHVybiAwOwogIHJldHVybiBjb250ZW50LnNwbGl0KCdcbicpLmxlbmd0aDsKfQoKLyoqCiAqIFZhbGlkYXRlIGV2aWRlbmNlUGF0aC9ldmlkZW5jZUxpbmUgYXQgY2FsbCB0aW1lIHNvIHRoZSBtb2RlbCBnZXRzIGFuCiAqIGFjdGlvbmFibGUgZXJyb3IgYW5kIGNhbiByZS1zdWJtaXQsIGluc3RlYWQgb2YgYSBzaWxlbnQgaG9zdC1zaWRlIHJlamVjdGlvbgogKiBhZnRlciB0aGUgcnVuIGVuZHMuCiAqLwpmdW5jdGlvbiB2YWxpZGF0ZUV2aWRlbmNlKHBhcmFtcykgewogIGNvbnN0IGV2aWRlbmNlUGF0aCA9CiAgICB0eXBlb2YgcGFyYW1zLmV2aWRlbmNlUGF0aCA9PT0gJ3N0cmluZycgPyBwYXJhbXMuZXZpZGVuY2VQYXRoLnRyaW0oKSA6ICcnOwogIGNvbnN0IGV2aWRlbmNlTGluZSA9IHBhcmFtcy5ldmlkZW5jZUxpbmU7CiAgaWYgKCFldmlkZW5jZVBhdGggfHwgIU51bWJlci5pc0ludGVnZXIoZXZpZGVuY2VMaW5lKSB8fCBldmlkZW5jZUxpbmUgPCAxKSB7CiAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgICdzdWJtaXRfZmluZGluZyByZXF1aXJlcyBhIHJlcG9zaXRvcnktcmVsYXRpdmUgZXZpZGVuY2VQYXRoIGFuZCBhIHBvc2l0aXZlIGludGVnZXIgZXZpZGVuY2VMaW5lLicsCiAgICApOwogIH0KCiAgY29uc3QgbGluZXMgPSBzbmFwc2hvdExpbmVDb3VudChldmlkZW5jZVBhdGgpOwogIGlmIChsaW5lcyA9PT0gbnVsbCkgewogICAgdGhyb3cgbmV3IEVycm9yKAogICAgICBgZXZpZGVuY2UgZmlsZSAiJHtldmlkZW5jZVBhdGh9IiB3YXMgbm90IGZvdW5kIGluIHRoZSByZXBvc2l0b3J5IHNuYXBzaG90IOKAlCBjaGVjayB0aGUgcGF0aCBpcyByZXBvc2l0b3J5LXJlbGF0aXZlIGFuZCBjb3JyZWN0IChlLmcuICJzcmMvbGliL3V0aWwudHMiKSwgdGhlbiByZS1zdWJtaXQuYCwKICAgICk7CiAgfQogIGlmIChsaW5lcyA+IDAgJiYgZXZpZGVuY2VMaW5lID4gbGluZXMpIHsKICAgIHRocm93IG5ldyBFcnJvcigKICAgICAgYGV2aWRlbmNlTGluZSAke2V2aWRlbmNlTGluZX0gaXMgb3V0IG9mIHJhbmdlIGZvciAiJHtldmlkZW5jZVBhdGh9IiAoMS0ke2xpbmVzfSkuIGAgKwogICAgICAgICdWZXJpZnkgdGhlIGV4YWN0IGxpbmUgd2l0aCByZWFkIG9yIGdyZXAsIHRoZW4gcmUtc3VibWl0IHRoZSBmaW5kaW5nIHdpdGggdGhlIGNvcnJlY3RlZCBldmlkZW5jZUxpbmUuJywKICAgICk7CiAgfQp9Cgpjb25zdCBnZXREaWZmVG9vbCA9IHsKICBuYW1lOiAnZ2V0X2RpZmYnLAogIGxhYmVsOiAnR2V0IGRpZmYnLAogIGRlc2NyaXB0aW9uOgogICAgJ1JldHVybiBvbmUgcGFnZSBvZiB0aGlzIHB1bGwgcmVxdWVzdCBwYXRjaCBmb3IgYSBjaGFuZ2VkIGZpbGUsIHdpdGggb2xkIGFuZCBuZXcgbGluZSBudW1iZXJzIHBlciBsaW5lIChhZGRlZCBsaW5lcyBjYXJyeSB0aGUgbmV3LWZpbGUgbGluZSBudW1iZXIpLiBQYWdlIHRocm91Z2ggbGFyZ2UgcGF0Y2hlcyBieSBwYXNzaW5nIG9mZnNldCB3aGlsZSAibW9yZSIgaXMgdHJ1ZS4nLAogIHBhcmFtZXRlcnM6IHsKICAgIHR5cGU6ICdvYmplY3QnLAogICAgcHJvcGVydGllczogewogICAgICBwYXRoOiB7CiAgICAgICAgdHlwZTogJ3N0cmluZycsCiAgICAgICAgZGVzY3JpcHRpb246ICdDaGFuZ2VkLWZpbGUgcGF0aCBleGFjdGx5IGFzIGxpc3RlZCBpbiB0aGUgcmV2aWV3IChlLmcuICJzcmMvaW5kZXgudHMiKS4nLAogICAgICB9LAogICAgICBvZmZzZXQ6IHsKICAgICAgICB0eXBlOiAnaW50ZWdlcicsCiAgICAgICAgZGVzY3JpcHRpb246IGAxLWJhc2VkIHBhdGNoLWxpbmUgb2Zmc2V0IHRvIHJlc3VtZSBmcm9tOyBvbWl0IGZvciB0aGUgZmlyc3QgcGFnZSAoJHtQQUdFX1NJWkV9IHBhdGNoIGxpbmVzIHBlciBwYWdlKS5gLAogICAgICB9LAogICAgfSwKICAgIHJlcXVpcmVkOiBbJ3BhdGgnXSwKICAgIGFkZGl0aW9uYWxQcm9wZXJ0aWVzOiBmYWxzZSwKICB9LAoKICBhc3luYyBleGVjdXRlKF90b29sQ2FsbElkLCBwYXJhbXMpIHsKICAgIGNvbnN0IHBhdGggPSB0eXBlb2YgcGFyYW1zLnBhdGggPT09ICdzdHJpbmcnID8gcGFyYW1zLnBhdGgudHJpbSgpIDogJyc7CiAgICBpZiAoIXBhdGgpIHRocm93IG5ldyBFcnJvcignZ2V0X2RpZmYgcmVxdWlyZXMgYSBub24tZW1wdHkgInBhdGgiLicpOwoKICAgIGNvbnN0IGRhdGEgPSBsb2FkRGlmZnMoKTsKICAgIGNvbnN0IGZpbGUgPSBmaW5kRmlsZShwYXRoKTsKICAgIGlmICghZmlsZSkgewogICAgICBjb25zdCBrbm93biA9IChkYXRhLmZpbGVzIHx8IFtdKS5tYXAoKGYpID0+IGYucGF0aCk7CiAgICAgIGNvbnN0IGxpc3RlZCA9IGtub3duLnNsaWNlKDAsIE1BWF9MSVNURURfUEFUSFMpLmpvaW4oJywgJyk7CiAgICAgIGNvbnN0IG1vcmUgPSBrbm93bi5sZW5ndGggPiBNQVhfTElTVEVEX1BBVEhTID8gYCwg4oCmICgke2tub3duLmxlbmd0aH0gdG90YWwpYCA6ICcnOwogICAgICBjb25zdCB0cnVuY2F0ZWROb3RlID0gZGF0YS50cnVuY2F0ZWQKICAgICAgICA/IGAgVGhlIGZpbGUgc2VsZWN0aW9uIHdhcyB0cnVuY2F0ZWQgKCR7ZGF0YS5yZXZpZXdlZEZpbGVzfSBvZiAke2RhdGEudG90YWxGaWxlc30gY2hhbmdlZCBmaWxlcyBhcmUgaW5zcGVjdGFibGUpLmAKICAgICAgICA6ICcnOwogICAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgICAgYCIke3BhdGh9IiBpcyBub3QgYW1vbmcgdGhlIGNoYW5nZWQgZmlsZXMgaW4gdGhpcyByZXZpZXcgKGNoYW5nZWQsIG5vbi1leGNsdWRlZCBmaWxlcyBvbmx5KS4gYCArCiAgICAgICAgICBgQ2hhbmdlZCBmaWxlczogJHtsaXN0ZWR9JHttb3JlfS4ke3RydW5jYXRlZE5vdGV9IGAgKwogICAgICAgICAgJ0ZvciB1bmNoYW5nZWQgZmlsZXMgb3IgYnJvYWRlciBjb250ZXh0LCB1c2UgcmVhZC9ncmVwIG9uIHRoZSByZXBvc2l0b3J5IHNuYXBzaG90IGluc3RlYWQuJywKICAgICAgKTsKICAgIH0KCiAgICBjb25zdCBsaW5lcyA9IGZpbGUubGluZXMgfHwgW107CiAgICBjb25zdCB0b3RhbCA9IGxpbmVzLmxlbmd0aDsKICAgIGlmICh0b3RhbCA9PT0gMCkgewogICAgICB0aHJvdyBuZXcgRXJyb3IoYFRoZSBwYXRjaCBmb3IgIiR7cGF0aH0iIGlzIGVtcHR5IG9yIGluY29tcGxldGUgaW4gdGhlIHJldmlldyBkYXRhLmApOwogICAgfQoKICAgIGNvbnN0IG9mZnNldCA9IHBhcmFtcy5vZmZzZXQgPT09IHVuZGVmaW5lZCA/IDEgOiBwYXJhbXMub2Zmc2V0OwogICAgaWYgKCFOdW1iZXIuaXNJbnRlZ2VyKG9mZnNldCkgfHwgb2Zmc2V0IDwgMSB8fCBvZmZzZXQgPiB0b3RhbCkgewogICAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgICAgYEludmFsaWQgb2Zmc2V0ICR7SlNPTi5zdHJpbmdpZnkocGFyYW1zLm9mZnNldCl9IGZvciAiJHtwYXRofSI6IG11c3QgYmUgYW4gaW50ZWdlciBiZXR3ZWVuIDEgYW5kICR7dG90YWx9ICh0aGUgcGF0Y2ggaGFzICR7dG90YWx9IGxpbmVzKS5gLAogICAgICApOwogICAgfQoKICAgIGNvbnN0IGVuZCA9IE1hdGgubWluKG9mZnNldCAtIDEgKyBQQUdFX1NJWkUsIHRvdGFsKTsKICAgIGNvbnN0IHBhZ2UgPSBsaW5lcy5zbGljZShvZmZzZXQgLSAxLCBlbmQpLm1hcChyZW5kZXJMaW5lKS5qb2luKCdcbicpOwogICAgY29uc3QgbW9yZSA9IGVuZCA8IHRvdGFsOwogICAgcmV0dXJuIHsKICAgICAgZGV0YWlsczogdW5kZWZpbmVkLAogICAgICBjb250ZW50OiBbCiAgICAgICAgewogICAgICAgICAgdHlwZTogJ3RleHQnLAogICAgICAgICAgdGV4dDoKICAgICAgICAgICAgYCR7cGF0aH0g4oCUICR7ZmlsZS5zdGF0dXN9LCArJHtmaWxlLmFkZGl0aW9uc30gLSR7ZmlsZS5kZWxldGlvbnN9LCBgICsKICAgICAgICAgICAgYHBhdGNoIGxpbmVzICR7b2Zmc2V0fS0ke2VuZH0gb2YgJHt0b3RhbH1cbmAgKwogICAgICAgICAgICAnQ29sdW1uczogb2xkLWxpbmUgbmV3LWxpbmUgY2hhbmdlIGNvbnRlbnQgKGJsYW5rID0gbm90IHByZXNlbnQgb24gdGhhdCBzaWRlKVxuJyArCiAgICAgICAgICAgIGAke3BhZ2V9XG5gICsKICAgICAgICAgICAgKG1vcmUKICAgICAgICAgICAgICA/IGBtb3JlOiB5ZXMg4oCUIGNhbGwgZ2V0X2RpZmYgYWdhaW4gd2l0aCBwYXRoPSIke3BhdGh9IiBvZmZzZXQ9JHtlbmQgKyAxfWAKICAgICAgICAgICAgICA6ICdtb3JlOiBubyDigJQgZW5kIG9mIHBhdGNoJyksCiAgICAgICAgfSwKICAgICAgXSwKICAgIH07CiAgfSwKfTsKCmNvbnN0IHN1Ym1pdEZpbmRpbmdUb29sID0gewogIG5hbWU6ICdzdWJtaXRfZmluZGluZycsCiAgbGFiZWw6ICdTdWJtaXQgZmluZGluZycsCiAgZGVzY3JpcHRpb246CiAgICAnUmVjb3JkIG9uZSBjYW5kaWRhdGUgZGVmZWN0IGludHJvZHVjZWQgYnkgdGhpcyBwdWxsIHJlcXVlc3QsIGFuY2hvcmVkIHRvIGFuIEFEREVEIGxpbmUgKG5ldy1maWxlIGxpbmUgbnVtYmVyKSBvZiBhIGNoYW5nZWQgZmlsZS4gT25seSBsaW5lcyB3aXRoIGEgIisiIGluIGdldF9kaWZmIG91dHB1dCBhcmUgdmFsaWQgYW5jaG9ycy4gUmVjb3JkaW5nIGRvZXMgbm90IHBvc3QgYW55dGhpbmc7IHRoZSBob3N0IHZhbGlkYXRlcyBiZWZvcmUgcHVibGlzaGluZy4nLAogIHBhcmFtZXRlcnM6IHsKICAgIHR5cGU6ICdvYmplY3QnLAogICAgcHJvcGVydGllczogewogICAgICBwYXRoOiB7CiAgICAgICAgdHlwZTogJ3N0cmluZycsCiAgICAgICAgZGVzY3JpcHRpb246ICdDaGFuZ2VkLWZpbGUgcGF0aCBjb250YWluaW5nIHRoZSBkZWZlY3QgKG11c3QgbWF0Y2ggZ2V0X2RpZmYgb3V0cHV0KS4nLAogICAgICB9LAogICAgICBsaW5lOiB7CiAgICAgICAgdHlwZTogJ2ludGVnZXInLAogICAgICAgIGRlc2NyaXB0aW9uOiAnTmV3LWZpbGUgbGluZSBudW1iZXIgb2YgYW4gQURERUQgbGluZSB0byBhbmNob3IgdGhlIGZpbmRpbmcgdG8uJywKICAgICAgfSwKICAgICAgdGl0bGU6IHsgdHlwZTogJ3N0cmluZycsIGRlc2NyaXB0aW9uOiAnT25lLWxpbmUgc3VtbWFyeSBvZiB0aGUgZGVmZWN0IChtYXggfjIwMCBjaGFycykuJyB9LAogICAgICBzZXZlcml0eTogewogICAgICAgIHR5cGU6ICdzdHJpbmcnLAogICAgICAgIGVudW06IFsnaGlnaCcsICdtZWRpdW0nLCAnbG93J10sCiAgICAgICAgZGVzY3JpcHRpb246ICdIb3cgbXVjaCB0aGlzIG1hdHRlcnMgaWYgc2hpcHBlZDogaGlnaCwgbWVkaXVtLCBvciBsb3cuJywKICAgICAgfSwKICAgICAgaW1wYWN0OiB7CiAgICAgICAgdHlwZTogJ3N0cmluZycsCiAgICAgICAgZGVzY3JpcHRpb246ICdXaGF0IGJyZWFrcyBvciBkZWdyYWRlcyBpZiB0aGlzIHNoaXBzICgxLTMgc2VudGVuY2VzKS4nLAogICAgICB9LAogICAgICBldmlkZW5jZVBhdGg6IHsKICAgICAgICB0eXBlOiAnc3RyaW5nJywKICAgICAgICBkZXNjcmlwdGlvbjoKICAgICAgICAgICdSZXBvc2l0b3J5IGZpbGUgeW91IGluc3BlY3RlZCB0aGF0IHN1cHBvcnRzIHRoZSBjbGFpbSAocmVwb3NpdG9yeS1yZWxhdGl2ZSwgbXVzdCBleGlzdCBpbiB0aGUgc25hcHNob3QpLicsCiAgICAgIH0sCiAgICAgIGV2aWRlbmNlTGluZTogewogICAgICAgIHR5cGU6ICdpbnRlZ2VyJywKICAgICAgICBkZXNjcmlwdGlvbjoKICAgICAgICAgICdMaW5lIG51bWJlciBpbiBldmlkZW5jZVBhdGggdGhhdCBzdXBwb3J0cyB0aGUgY2xhaW0gKG11c3QgYmUgd2l0aGluIHRoZSBmaWxlIOKAlCB2ZXJpZnkgd2l0aCByZWFkL2dyZXAgYmVmb3JlIHN1Ym1pdHRpbmcpLicsCiAgICAgIH0sCiAgICAgIGV2aWRlbmNlOiB7CiAgICAgICAgdHlwZTogJ3N0cmluZycsCiAgICAgICAgZGVzY3JpcHRpb246ICdXaHkgdGhlIGNpdGVkIGxpbmUocykgZGVtb25zdHJhdGUgdGhlIHByb2JsZW0uJywKICAgICAgfSwKICAgICAgc3VnZ2VzdGVkRml4OiB7IHR5cGU6ICdzdHJpbmcnLCBkZXNjcmlwdGlvbjogJ0NvbmNyZXRlIHN1Z2dlc3RlZCBmaXggKDEtMyBzZW50ZW5jZXMpLicgfSwKICAgIH0sCiAgICByZXF1aXJlZDogWwogICAgICAncGF0aCcsCiAgICAgICdsaW5lJywKICAgICAgJ3RpdGxlJywKICAgICAgJ3NldmVyaXR5JywKICAgICAgJ2ltcGFjdCcsCiAgICAgICdldmlkZW5jZVBhdGgnLAogICAgICAnZXZpZGVuY2VMaW5lJywKICAgICAgJ2V2aWRlbmNlJywKICAgICAgJ3N1Z2dlc3RlZEZpeCcsCiAgICBdLAogICAgYWRkaXRpb25hbFByb3BlcnRpZXM6IGZhbHNlLAogIH0sCgogIGFzeW5jIGV4ZWN1dGUoX3Rvb2xDYWxsSWQsIHBhcmFtcykgewogICAgaWYgKGZpbmlzaGVkKSB0aHJvdyBuZXcgRXJyb3IoJ1RoZSByZXZpZXcgaXMgYWxyZWFkeSBjb21wbGV0ZTsgbm8gbW9yZSBmaW5kaW5ncyBjYW4gYmUgc3VibWl0dGVkLicpOwogICAgaWYgKGZpbmRpbmdzLmxlbmd0aCA+PSBNQVhfRklORElOR1MpIHsKICAgICAgdGhyb3cgbmV3IEVycm9yKGBGaW5kaW5nIGxpbWl0IHJlYWNoZWQgKCR7TUFYX0ZJTkRJTkdTfSk7IGRvIG5vdCBzdWJtaXQgbW9yZS5gKTsKICAgIH0KCiAgICBjb25zdCBwYXRoID0gdHlwZW9mIHBhcmFtcy5wYXRoID09PSAnc3RyaW5nJyA/IHBhcmFtcy5wYXRoLnRyaW0oKSA6ICcnOwogICAgY29uc3QgZmlsZSA9IGZpbmRGaWxlKHBhdGgpOwogICAgaWYgKCFmaWxlKSB7CiAgICAgIHRocm93IG5ldyBFcnJvcigKICAgICAgICBgIiR7cGF0aH0iIGlzIG5vdCBhbW9uZyB0aGUgY2hhbmdlZCBmaWxlcyBpbiB0aGlzIHJldmlldyDigJQgZmluZGluZ3MgbXVzdCBhbmNob3IgdG8gYSBjaGFuZ2VkIGZpbGUuIGAgKwogICAgICAgICAgJ0NhbGwgZ2V0X2RpZmYgZm9yIHRoZSBmaWxlIHRvIGNvbmZpcm0gdGhlIGV4YWN0IHBhdGggYW5kIGFkZGVkLWxpbmUgbnVtYmVycywgdGhlbiByZS1zdWJtaXQuJywKICAgICAgKTsKICAgIH0KCiAgICBjb25zdCBsaW5lID0gcGFyYW1zLmxpbmU7CiAgICBpZiAoIU51bWJlci5pc0ludGVnZXIobGluZSkgfHwgbGluZSA8IDEpIHsKICAgICAgdGhyb3cgbmV3IEVycm9yKGBJbnZhbGlkIGxpbmUgJHtKU09OLnN0cmluZ2lmeShsaW5lKX06IG11c3QgYmUgYSBwb3NpdGl2ZSBpbnRlZ2VyLmApOwogICAgfQoKICAgIGNvbnN0IGFuY2hvciA9IChmaWxlLmxpbmVzIHx8IFtdKS5maW5kKChsKSA9PiBsLnR5cGUgPT09ICdhZGQnICYmIGwubmV3TGluZSA9PT0gbGluZSk7CiAgICBpZiAoIWFuY2hvcikgewogICAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgICAgYExpbmUgJHtsaW5lfSBvZiAiJHtwYXRofSIgaXMgbm90IGFuIGFkZGVkIGxpbmUgaW4gdGhpcyBQUiDigJQgZmluZGluZ3MgbXVzdCBhbmNob3IgdG8gYWRkZWQgKCIrIikgbGluZXMuIGAgKwogICAgICAgICAgYENhbGwgZ2V0X2RpZmYgZm9yICIke3BhdGh9IiwgcGljayB0aGUgbmV3LWZpbGUgbGluZSBudW1iZXIgb2YgYSAiKyIgbGluZSwgYW5kIHJlLXN1Ym1pdC5gLAogICAgICApOwogICAgfQoKICAgIHZhbGlkYXRlRXZpZGVuY2UocGFyYW1zKTsKCiAgICBjb25zdCBrZXkgPSBgJHtwYXRofToke2xpbmV9YDsKICAgIGlmIChmaW5kaW5nS2V5cy5oYXMoa2V5KSkgewogICAgICB0aHJvdyBuZXcgRXJyb3IoCiAgICAgICAgYEEgZmluZGluZyBpcyBhbHJlYWR5IHJlY29yZGVkIGF0ICR7a2V5fTsgY29tYmluZSB0aGVtIG9yIHBpY2sgYSBkaWZmZXJlbnQgYW5jaG9yIGxpbmUuYCwKICAgICAgKTsKICAgIH0KCiAgICBmaW5kaW5ncy5wdXNoKHBhcmFtcyk7CiAgICBmaW5kaW5nS2V5cy5hZGQoa2V5KTsKICAgIHJldHVybiB7CiAgICAgIGRldGFpbHM6IHVuZGVmaW5lZCwKICAgICAgY29udGVudDogWwogICAgICAgIHsKICAgICAgICAgIHR5cGU6ICd0ZXh0JywKICAgICAgICAgIHRleHQ6IGBSZWNvcmRlZCBmaW5kaW5nICMke2ZpbmRpbmdzLmxlbmd0aH0gYXQgJHtrZXl9ICgke3BhcmFtcy5zZXZlcml0eX0pLiBUaGlzIHJlY29yZHMgYSBjYW5kaWRhdGUgb25seSDigJQgbm90aGluZyBpcyBwb3N0ZWQgeWV0LiBDYWxsIGZpbmlzaF9yZXZpZXcgd2hlbiB0aGUgcmV2aWV3IGlzIGNvbXBsZXRlLmAsCiAgICAgICAgfSwKICAgICAgXSwKICAgIH07CiAgfSwKfTsKCmNvbnN0IGZpbmlzaFJldmlld1Rvb2wgPSB7CiAgbmFtZTogJ2ZpbmlzaF9yZXZpZXcnLAogIGxhYmVsOiAnRmluaXNoIHJldmlldycsCiAgZGVzY3JpcHRpb246CiAgICAnQ29tcGxldGUgdGhlIHJldmlldy4gQ2FsbCBleGFjdGx5IG9uY2UsIGFmdGVyIGFsbCBpbnZlc3RpZ2F0aW9uIGFuZCBmaW5kaW5ncy4gUmVxdWlyZWQgZXZlbiB3aGVuIG5vIGZpbmRpbmdzIHdlcmUgc3VibWl0dGVkLicsCiAgcGFyYW1ldGVyczogewogICAgdHlwZTogJ29iamVjdCcsCiAgICBwcm9wZXJ0aWVzOiB7CiAgICAgIHN1bW1hcnk6IHsKICAgICAgICB0eXBlOiAnc3RyaW5nJywKICAgICAgICBkZXNjcmlwdGlvbjogJ092ZXJhbGwgYXNzZXNzbWVudCBvZiB0aGUgY2hhbmdlICgyLTQgc2VudGVuY2VzKS4nLAogICAgICB9LAogICAgICBsaW1pdGF0aW9uczogewogICAgICAgIHR5cGU6ICdhcnJheScsCiAgICAgICAgaXRlbXM6IHsgdHlwZTogJ3N0cmluZycgfSwKICAgICAgICBkZXNjcmlwdGlvbjogJ0hvbmVzdCBjb3ZlcmFnZSBsaW1pdGF0aW9ucyAoYXJlYXMgbm90IHZlcmlmaWVkLCB0b29saW5nIGdhcHMsIGV0Yy4pLicsCiAgICAgIH0sCiAgICAgIGZpbGVTdW1tYXJpZXM6IHsKICAgICAgICB0eXBlOiAnYXJyYXknLAogICAgICAgIGl0ZW1zOiB7CiAgICAgICAgICB0eXBlOiAnb2JqZWN0JywKICAgICAgICAgIHByb3BlcnRpZXM6IHsKICAgICAgICAgICAgcGF0aDogeyB0eXBlOiAnc3RyaW5nJywgZGVzY3JpcHRpb246ICdDaGFuZ2VkLWZpbGUgcGF0aC4nIH0sCiAgICAgICAgICAgIGRlc2NyaXB0aW9uOiB7IHR5cGU6ICdzdHJpbmcnLCBkZXNjcmlwdGlvbjogJ1doYXQgY2hhbmdlZCBpbiB0aGlzIGZpbGUgKG9uZSBzZW50ZW5jZSkuJyB9LAogICAgICAgICAgfSwKICAgICAgICAgIHJlcXVpcmVkOiBbJ3BhdGgnLCAnZGVzY3JpcHRpb24nXSwKICAgICAgICAgIGFkZGl0aW9uYWxQcm9wZXJ0aWVzOiBmYWxzZSwKICAgICAgICB9LAogICAgICAgIGRlc2NyaXB0aW9uOiAnT3B0aW9uYWwgcGVyLWZpbGUgY2hhbmdlIHN1bW1hcmllcyBmb3IgdGhlIGNoYW5nZWQgZmlsZXMuJywKICAgICAgfSwKICAgIH0sCiAgICByZXF1aXJlZDogWydzdW1tYXJ5J10sCiAgICBhZGRpdGlvbmFsUHJvcGVydGllczogZmFsc2UsCiAgfSwKCiAgYXN5bmMgZXhlY3V0ZShfdG9vbENhbGxJZCwgcGFyYW1zKSB7CiAgICBpZiAoZmluaXNoZWQpIHsKICAgICAgdGhyb3cgbmV3IEVycm9yKCdmaW5pc2hfcmV2aWV3IHdhcyBhbHJlYWR5IGNhbGxlZDsgdGhlIHJldmlldyBpcyBjb21wbGV0ZS4nKTsKICAgIH0KICAgIGZpbmlzaGVkID0gdHJ1ZTsKICAgIGNsZWFyVGltZW91dCh3cmFwVXBUaW1lcik7CiAgICByZXR1cm4gewogICAgICBkZXRhaWxzOiB1bmRlZmluZWQsCiAgICAgIGNvbnRlbnQ6IFsKICAgICAgICB7CiAgICAgICAgICB0eXBlOiAndGV4dCcsCiAgICAgICAgICB0ZXh0OiBgUmV2aWV3IGZpbmlzaGVkOiAke2ZpbmRpbmdzLmxlbmd0aH0gZmluZGluZyhzKSByZWNvcmRlZCwgc3VtbWFyeSBhY2NlcHRlZC4gWW91IG1heSBub3cgZ2l2ZSBhIGJyaWVmIGNsb3NpbmcgbWVzc2FnZSAobm8gSlNPTiByZXF1aXJlZCkuYCwKICAgICAgICB9LAogICAgICBdLAogICAgfTsKICB9LAp9OwoKZXhwb3J0IGRlZmF1bHQgZnVuY3Rpb24gKHBpKSB7CiAgcGkucmVnaXN0ZXJUb29sKGdldERpZmZUb29sKTsKICBwaS5yZWdpc3RlclRvb2woc3VibWl0RmluZGluZ1Rvb2wpOwogIHBpLnJlZ2lzdGVyVG9vbChmaW5pc2hSZXZpZXdUb29sKTsKCiAgcGkub24oJ3Nlc3Npb25fc3RhcnQnLCAoKSA9PiB7CiAgICBjb25zdCB0aW1lb3V0TXMgPSBOdW1iZXIocHJvY2Vzcy5lbnYuUkVWSUVXQUxMWV9USU1FT1VUX01TKTsKICAgIGlmICghTnVtYmVyLmlzRmluaXRlKHRpbWVvdXRNcykgfHwgdGltZW91dE1zIDw9IDApIHJldHVybjsKICAgIHdyYXBVcFRpbWVyID0gc2V0VGltZW91dCgoKSA9PiB7CiAgICAgIGlmIChmaW5pc2hlZCB8fCBmaW5hbGl6aW5nKSByZXR1cm47CiAgICAgIGZpbmFsaXppbmcgPSB0cnVlOwogICAgICBwaS5zZXRBY3RpdmVUb29scyhbJ3N1Ym1pdF9maW5kaW5nJywgJ2ZpbmlzaF9yZXZpZXcnXSk7CiAgICAgIHBpLnNldFRoaW5raW5nTGV2ZWwoJ2xvdycpOwogICAgICBwaS5zZW5kTWVzc2FnZSgKICAgICAgICB7CiAgICAgICAgICBjdXN0b21UeXBlOiAncmV2aWV3YWxseV9idWRnZXQnLAogICAgICAgICAgY29udGVudDoKICAgICAgICAgICAgJ1RoZSBpbnZlc3RpZ2F0aW9uIGJ1ZGdldCBpcyBleGhhdXN0ZWQuIFN0b3AgaW52ZXN0aWdhdGluZyBub3cuIFN1Ym1pdCBvbmx5IGZpbmRpbmdzIHlvdSBoYXZlIGFscmVhZHkgdmVyaWZpZWQsIHRoZW4gY2FsbCBmaW5pc2hfcmV2aWV3IGltbWVkaWF0ZWx5LiBJbmNsdWRlIHRoZSB0aW1lIGJ1ZGdldCBhbmQgdW5pbnNwZWN0ZWQgYXJlYXMgaW4gbGltaXRhdGlvbnM7IGRvIG5vdCBjbGFpbSBmdWxsIGNvdmVyYWdlLiBEbyBub3QgZ2l2ZSBhIHByb3NlLW9ubHkgYW5zd2VyIGluc3RlYWQgb2YgY2FsbGluZyBmaW5pc2hfcmV2aWV3LicsCiAgICAgICAgICBkaXNwbGF5OiBmYWxzZSwKICAgICAgICB9LAogICAgICAgIHsgZGVsaXZlckFzOiAnc3RlZXInLCB0cmlnZ2VyVHVybjogdHJ1ZSB9LAogICAgICApOwogICAgfSwgTWF0aC5mbG9vcih0aW1lb3V0TXMgKiAwLjcpKTsKICAgIHdyYXBVcFRpbWVyLnVucmVmKCk7CiAgfSk7CiAgcGkub24oJ2FnZW50X3NldHRsZWQnLCAoKSA9PiBjbGVhclRpbWVvdXQod3JhcFVwVGltZXIpKTsKICBwaS5vbignc2Vzc2lvbl9zaHV0ZG93bicsICgpID0+IGNsZWFyVGltZW91dCh3cmFwVXBUaW1lcikpOwp9Cg==';
+/** Decode the embedded extension source. */
+function extensionSource() {
+    return Buffer.from(exports.EXTENSION_SOURCE_B64, 'base64').toString('utf8');
+}
+
+
+/***/ }),
+
+/***/ 1011:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.formatAgentReview = formatAgentReview;
+exports.formatFindingComment = formatFindingComment;
+const util_1 = __nccwpck_require__(1125);
+const CHANGE_TYPE = {
+    added: 'Added',
+    modified: 'Modified',
+    removed: 'Removed',
+    renamed: 'Renamed',
+    copied: 'Copied',
+    changed: 'Changed',
+};
+const SEVERITY_LABEL = {
+    high: 'High',
+    medium: 'Medium',
+    low: 'Low',
+};
+/** Format the agent-mode review: top-level body + one inline comment per finding. */
+function formatAgentReview(input) {
+    const out = [];
+    out.push('### 🤖 ReviewAlly agent review', '');
+    out.push(statusLine(input), '');
+    out.push('<details>', '<summary>Review walkthrough</summary>', '');
+    out.push('#### Changed files', '');
+    out.push('| File | Change | Diff inspected | Summary |');
+    out.push('| :--- | :--- | :--- | :--- |');
+    const summaries = new Map((input.finish?.fileSummaries ?? []).map((f) => [f.path, f.description]));
+    const inspected = new Set(input.inspectedPaths);
+    for (const f of input.files) {
+        const changeType = CHANGE_TYPE[f.status] ?? capitalize(f.status);
+        const wasInspected = inspected.has(f.filename) ? 'yes' : '—';
+        const description = summaries.get(f.filename)?.trim() || `+${f.additions} -${f.deletions}`;
+        out.push(`| \`${cell(f.filename)}\` | ${changeType} | ${wasInspected} | ${cell((0, util_1.truncate)(description, 400))} |`);
+    }
+    out.push('');
+    out.push('#### Diff inspection', '');
+    const inspectedCount = input.files.filter((f) => inspected.has(f.filename)).length;
+    out.push(`${inspectedCount} of ${input.files.length} reviewed file patches were explicitly ` +
+        `inspected via \`get_diff\`.`);
+    if (input.selectionTruncated) {
+        out.push(`_Incomplete coverage: the file selection was truncated (${input.truncatedReason ?? 'limits reached'})._`);
+    }
+    out.push('');
+    out.push('#### Assessment', '');
+    out.push(input.finish?.summary
+        ? (0, util_1.truncate)(inline(input.finish.summary), 2000)
+        : '_No summary recorded — the review did not complete._', '');
+    out.push('#### Limitations', '');
+    const limitations = (input.finish?.limitations ?? []).map((l) => (0, util_1.truncate)(inline(l), 500));
+    if (limitations.length === 0) {
+        out.push('_None recorded._');
+    }
+    else {
+        for (const l of limitations)
+            out.push(`- ${l}`);
+    }
+    out.push('');
+    if (input.rejected.length > 0 || input.toolErrors.length > 0 || input.capped) {
+        out.push('#### Not posted', '');
+        for (const r of input.rejected) {
+            const loc = r.line !== undefined ? `:${r.line}` : '';
+            out.push(`- Rejected candidate \`${cell(r.path)}${loc}\` — ${cell((0, util_1.truncate)(r.reason, 300))}`);
+        }
+        for (const e of input.toolErrors)
+            out.push(`- Tool error: ${cell((0, util_1.truncate)(e, 300))}`);
+        if (input.capped)
+            out.push('- Additional candidates were dropped (finding limit reached).');
+        out.push('');
+    }
+    out.push(`**Reviewed head:** \`${input.headSha}\``, '');
+    out.push('</details>', '');
+    out.push('---', '_Automated review using ReviewAlly._');
+    const comments = input.postInline
+        ? input.validFindings.map((f) => ({
+            path: f.path,
+            line: f.line,
+            side: 'RIGHT',
+            body: formatFindingComment(f),
+        }))
+        : [];
+    return { body: out.join('\n'), comments };
+}
+/** Markdown body for one inline finding comment. */
+function formatFindingComment(f) {
+    const severity = SEVERITY_LABEL[f.severity] ?? capitalize(f.severity);
+    return [
+        `**[${severity}] ${(0, util_1.truncate)(f.title.trim(), 200)}**`,
+        '',
+        `**Impact:** ${(0, util_1.truncate)(inline(f.impact), 1200)}`,
+        '',
+        `**Evidence** \`${f.evidencePath}:${f.evidenceLine}\``,
+        `> ${(0, util_1.truncate)(inline(f.evidence), 1200)}`,
+        '',
+        `**Suggested fix:** ${(0, util_1.truncate)(inline(f.suggestedFix), 1200)}`,
+    ].join('\n');
+}
+function statusLine(input) {
+    const n = input.postInline ? input.validFindings.length : 0;
+    if (input.status === 'stale') {
+        return (`**Partial review — the PR head moved.** This review covers \`${input.headSha}\`; ` +
+            'the branch has advanced since. No inline findings were posted.');
+    }
+    if (input.status === 'partial') {
+        const reasons = [];
+        if (input.timedOut)
+            reasons.push('the agent run hit the hard timeout');
+        if (input.budgetLimited)
+            reasons.push('the investigation time budget was exhausted');
+        if (!input.finish)
+            reasons.push('the agent did not call finish_review');
+        if (input.uncompletedCalls > 0) {
+            reasons.push(`${input.uncompletedCalls} tool call(s) were interrupted`);
+        }
+        const findingsNote = n > 0
+            ? ` ${n} finding(s) met the bar and are posted inline; treat coverage as incomplete.`
+            : '';
+        return `**Partial review** — ${reasons.join('; ') || 'the run ended early'}.${findingsNote}`;
+    }
+    if (n === 0) {
+        return ('**Completed — no findings.** Nothing met the evidence bar for an inline comment; ' +
+            'see the walkthrough for coverage and limitations.');
+    }
+    return `**Completed** — ${n} finding(s) posted as inline review comments below. Reply on any thread to discuss.`;
+}
+function cell(text) {
+    return text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
+}
+function inline(text) {
+    return text.replace(/\r?\n/g, ' ').trim();
+}
+function capitalize(value) {
+    return value ? value.charAt(0).toUpperCase() + value.slice(1) : 'Modified';
+}
+
+
+/***/ }),
+
 /***/ 5149:
 /***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PI_CUSTOM_API_KEY_ENV = exports.PI_CUSTOM_PROVIDER = exports.PI_PACKAGE = void 0;
+exports.PI_TIMEOUT_ENV = exports.PI_DIFFS_FILE_ENV = exports.PI_CUSTOM_API_KEY_ENV = exports.PI_CUSTOM_PROVIDER = exports.PI_PACKAGE = void 0;
 exports.providerFor = providerFor;
 exports.buildModelsJson = buildModelsJson;
 exports.buildPiArgs = buildPiArgs;
@@ -31726,23 +32006,39 @@ exports.PI_PACKAGE = '@earendil-works/pi-coding-agent';
 exports.PI_CUSTOM_PROVIDER = 'custom';
 /** Env var referenced by models.json ($ interpolation) for the compatible key. */
 exports.PI_CUSTOM_API_KEY_ENV = 'CUSTOM_API_KEY';
+/** Env var pointing the ReviewAlly tools extension at the PR patch data. */
+exports.PI_DIFFS_FILE_ENV = 'REVIEWALLY_DIFFS_FILE';
+exports.PI_TIMEOUT_ENV = 'REVIEWALLY_TIMEOUT_MS';
 /** Headless, ephemeral, read-only flags. Reused across runs and asserted by tests. */
 const PI_FLAGS = [
     '-p', // print mode: process the prompt and exit
     '--no-session', // ephemeral; never persist
     '--mode',
     'json', // JSONL event stream on stdout
-    '--offline', // no startup network (update checks / telemetry) — does not block the model call
-    '--thinking',
-    'off', // cost control
-    '--no-extensions',
+    '--no-extensions', // discovered extensions stay off; the ReviewAlly extension loads explicitly
     '--no-skills',
     '--no-prompt-templates',
     '--no-context-files',
     '--no-themes',
     '--tools',
-    'read,grep,find,ls', // read-only investigation tools (no bash/edit/write)
+    // read-only investigation tools (no bash/edit/write) + ReviewAlly review tools
+    'read,grep,find,ls,get_diff,submit_finding,finish_review',
 ];
+/**
+ * OpenAI-style reasoning_effort value for each pi thinking level. pi clamps
+ * the requested level to what the model entry declares; xhigh/max collapse to
+ * 'high' since OpenAI-compatible servers top out there. `off: null` marks
+ * models that cannot disable reasoning — pi then sends no effort field.
+ */
+const THINKING_LEVEL_MAP = {
+    off: null,
+    minimal: 'minimal',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'high',
+    max: 'high',
+};
 /** Map the action's api-type to a pi provider id. */
 function providerFor(inputs) {
     switch (inputs.apiType) {
@@ -31767,6 +32063,10 @@ function buildModelsJson(inputs) {
     if (inputs.apiType !== 'openai-chat-compatible') {
         throw new Error('buildModelsJson is only for openai-chat-compatible.');
     }
+    // With a thinking level above off, declare the model's reasoning capability
+    // so pi transmits reasoning_effort — without it the provider silently uses
+    // its default reasoning level, which can dominate run time.
+    const wantsThinking = inputs.piThinking !== 'off';
     return {
         providers: {
             [exports.PI_CUSTOM_PROVIDER]: {
@@ -31775,20 +32075,36 @@ function buildModelsJson(inputs) {
                 api: 'openai-completions',
                 apiKey: `$${exports.PI_CUSTOM_API_KEY_ENV}`,
                 // Maximise compatibility with arbitrary OpenAI-compatible servers:
-                // send the system prompt as a `system` message and skip reasoning knobs.
-                compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
-                models: [{ id: inputs.model }],
+                // send the system prompt as a `system` message. reasoning_effort is
+                // only sent when the user opts into a thinking level.
+                compat: {
+                    supportsDeveloperRole: false,
+                    supportsReasoningEffort: wantsThinking,
+                },
+                models: [
+                    {
+                        id: inputs.model,
+                        ...(wantsThinking ? { reasoning: true, thinkingLevelMap: THINKING_LEVEL_MAP } : {}),
+                    },
+                ],
             },
         },
     };
 }
 /**
- * Build the pi CLI args for a headless read-only review run.
- * Assumes models.json (for compatible) has already been written to the config dir.
+ * Build the pi CLI args for a headless read-only review run. The ReviewAlly
+ * tools extension is passed explicitly (explicit --extension paths load even
+ * with --no-extensions). Assumes models.json (for compatible) has already
+ * been written to the config dir.
  */
-function buildPiArgs(systemPrompt, userPrompt, inputs) {
+function buildPiArgs(systemPrompt, userPrompt, inputs, extensionPath) {
     return [
-        ...PI_FLAGS,
+        ...PI_FLAGS.slice(0, 4),
+        '--thinking',
+        inputs.piThinking,
+        ...PI_FLAGS.slice(4),
+        '--extension',
+        extensionPath,
         '--system-prompt',
         systemPrompt,
         '--provider',
@@ -31799,11 +32115,16 @@ function buildPiArgs(systemPrompt, userPrompt, inputs) {
     ];
 }
 /** Build the child-process env. The API key is injected via env, never argv. */
-function buildPiEnv(inputs, configDir) {
+function buildPiEnv(inputs, configDir, diffsFile) {
     const env = {
         ...process.env,
         PI_CODING_AGENT_DIR: configDir,
+        PI_OFFLINE: '0',
+        [exports.PI_TIMEOUT_ENV]: String(inputs.piTimeoutMs),
     };
+    if (diffsFile) {
+        env[exports.PI_DIFFS_FILE_ENV] = diffsFile;
+    }
     if (inputs.apiType === 'anthropic') {
         env.ANTHROPIC_API_KEY = inputs.apiKey;
     }
@@ -31988,7 +32309,6 @@ const fs = __importStar(__nccwpck_require__(3024));
 const path = __importStar(__nccwpck_require__(6760));
 const os = __importStar(__nccwpck_require__(8161));
 const node_child_process_1 = __nccwpck_require__(1421);
-const node_readline_1 = __nccwpck_require__(481);
 const core = __importStar(__nccwpck_require__(7484));
 const pi_args_1 = __nccwpck_require__(5149);
 const SIGKILL_DELAY_MS = 5000;
@@ -32048,10 +32368,13 @@ function runNpm(args, cwd) {
 }
 /**
  * Spawn the pi CLI, stream its JSONL stdout into parsed events, and resolve on
- * completion. Enforces a hard timeout (SIGTERM then SIGKILL). Rejects if the
- * process produces no events and exits non-zero, or if it times out.
+ * completion. Enforces a hard timeout (SIGTERM then SIGKILL). `onEvent`, when
+ * given, receives every parsed event in order (live trace). On timeout the
+ * promise RESOLVES with the partial events and `timedOut: true` so the caller
+ * can still use and log what happened before the kill. Rejects only if the
+ * process produces no events and exits non-zero, or fails to spawn.
  */
-function invokePi(cliEntry, args, cwd, env, timeoutMs) {
+function invokePi(cliEntry, args, cwd, env, timeoutMs, onEvent) {
     return new Promise((resolve, reject) => {
         const events = [];
         let stderr = '';
@@ -32066,22 +32389,38 @@ function invokePi(cliEntry, args, cwd, env, timeoutMs) {
             timedOut = true;
             child.kill('SIGTERM');
             killTimer = setTimeout(() => {
-                if (!child.killed)
+                if (child.exitCode === null && child.signalCode === null)
                     child.kill('SIGKILL');
             }, SIGKILL_DELAY_MS);
         }, timeoutMs);
-        const rl = (0, node_readline_1.createInterface)({ input: child.stdout, crlfDelay: Infinity });
-        rl.on('line', (line) => {
+        // JSONL records are LF-terminated. Node's readline also treats U+2028/U+2029
+        // as line separators, which can corrupt records whose JSON strings contain
+        // those characters (e.g. model-authored tool arguments), so split on LF only.
+        const handleLine = (line) => {
             const trimmed = line.trim();
             if (!trimmed.startsWith('{'))
                 return;
             try {
                 const parsed = JSON.parse(trimmed);
-                if (isPiEvent(parsed))
+                if (isPiEvent(parsed)) {
                     events.push(parsed);
+                    onEvent?.(parsed);
+                }
             }
             catch {
                 /* skip non-JSON lines */
+            }
+        };
+        let buffer = '';
+        child.stdout.setEncoding('utf-8');
+        child.stdout.on('data', (chunk) => {
+            buffer += chunk;
+            let idx = buffer.indexOf('\n');
+            while (idx !== -1) {
+                const line = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 1);
+                handleLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+                idx = buffer.indexOf('\n');
             }
         });
         child.stderr?.setEncoding('utf-8');
@@ -32098,8 +32437,10 @@ function invokePi(cliEntry, args, cwd, env, timeoutMs) {
             clearTimeout(timer);
             if (killTimer)
                 clearTimeout(killTimer);
+            if (buffer.trim())
+                handleLine(buffer);
             if (timedOut) {
-                reject(new Error(`pi review timed out after ${timeoutMs}ms.`));
+                resolve({ events, stderr, timedOut: true });
                 return;
             }
             if (code !== 0) {
@@ -32110,7 +32451,7 @@ function invokePi(cliEntry, args, cwd, env, timeoutMs) {
                     core.warning(`pi exited with code ${code} but produced ${events.length} event(s); using partial output.`);
                 }
             }
-            resolve({ events, stderr });
+            resolve({ events, stderr, timedOut: false });
         });
     });
 }
@@ -32157,6 +32498,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DIFFS_FILE = exports.EXTENSION_FILE = void 0;
 exports.runAgentReview = runAgentReview;
 const fs = __importStar(__nccwpck_require__(3024));
 const path = __importStar(__nccwpck_require__(6760));
@@ -32165,27 +32507,74 @@ const core = __importStar(__nccwpck_require__(7484));
 const pi_args_1 = __nccwpck_require__(5149);
 const pi_process_1 = __nccwpck_require__(7603);
 const pi_output_1 = __nccwpck_require__(7269);
+const tools_1 = __nccwpck_require__(8501);
+const extension_source_1 = __nccwpck_require__(2929);
+const trace_1 = __nccwpck_require__(3599);
+exports.EXTENSION_FILE = 'reviewally-tools.js';
+exports.DIFFS_FILE = 'diffs.json';
 /**
  * Run the agent-mode review: install the pi subprocess, write an ephemeral
- * config dir (models.json for openai-chat-compatible), spawn the CLI against the
- * repo snapshot, and parse its JSONL event stream into a ReviewResult.
+ * config dir (models.json for openai-chat-compatible, the ReviewAlly tools
+ * extension and its diff data), spawn the CLI against the repo snapshot, and
+ * parse its JSONL event stream into a review result plus collected tool calls.
  */
-async function runAgentReview(systemPrompt, userPrompt, repoRoot, inputs) {
+async function runAgentReview(systemPrompt, userPrompt, repoRoot, inputs, fetch) {
     const cliEntry = await (0, pi_process_1.ensurePiInstalled)(inputs.piVersion);
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-config-'));
     try {
         if (inputs.apiType === 'openai-chat-compatible') {
             fs.writeFileSync(path.join(configDir, 'models.json'), JSON.stringify((0, pi_args_1.buildModelsJson)(inputs), null, 2));
         }
-        const args = (0, pi_args_1.buildPiArgs)(systemPrompt, userPrompt, inputs);
-        const env = (0, pi_args_1.buildPiEnv)(inputs, configDir);
+        const extensionPath = path.join(configDir, exports.EXTENSION_FILE);
+        fs.writeFileSync(extensionPath, (0, extension_source_1.extensionSource)());
+        const diffsFile = path.join(configDir, exports.DIFFS_FILE);
+        fs.writeFileSync(diffsFile, JSON.stringify((0, tools_1.buildDiffsPayload)(fetch)));
+        const systemPromptFile = path.join(configDir, 'system-prompt.txt');
+        const userPromptFile = path.join(configDir, 'user-prompt.txt');
+        fs.writeFileSync(systemPromptFile, systemPrompt);
+        fs.writeFileSync(userPromptFile, userPrompt);
+        const args = (0, pi_args_1.buildPiArgs)(systemPromptFile, `@${userPromptFile}`, inputs, extensionPath);
+        const env = (0, pi_args_1.buildPiEnv)(inputs, configDir, diffsFile);
         core.info(`pi engine: provider=${(0, pi_args_1.providerFor)(inputs)} model=${inputs.model} ` +
             `timeout=${inputs.piTimeoutMs}ms`);
-        const { events, stderr } = await (0, pi_process_1.invokePi)(cliEntry, args, repoRoot.path, env, inputs.piTimeoutMs);
+        const { events, stderr, timedOut } = await (0, pi_process_1.invokePi)(cliEntry, args, repoRoot.path, env, inputs.piTimeoutMs, (0, trace_1.liveTracer)(inputs.piLog));
+        const transcriptFile = (0, trace_1.writeTranscriptFile)(events);
+        core.info(`pi transcript saved to ${transcriptFile}`);
+        if (timedOut) {
+            core.warning(`pi review timed out after ${inputs.piTimeoutMs}ms — using partial results.`);
+        }
         if (stderr.trim()) {
             core.warning(`pi stderr (truncated):\n${stderr.trim().slice(0, 2000)}`);
         }
-        return (0, pi_output_1.parsePiOutput)(events);
+        const toolCalls = (0, tools_1.collectAgentToolCalls)(events);
+        const hasSignal = toolCalls.finish !== undefined || toolCalls.findings.length > 0 || toolCalls.diffCalls > 0;
+        // Findings come from tool calls, so a missing final message is not fatal
+        // when the tools recorded results; otherwise surface the parse failure with
+        // the full transcript so the run is debuggable.
+        let base;
+        try {
+            base = (0, pi_output_1.parsePiOutput)(events);
+        }
+        catch (err) {
+            if (hasSignal) {
+                base = {
+                    text: '',
+                    inputTokens: undefined,
+                    outputTokens: undefined,
+                    totalTokens: undefined,
+                    steps: events.filter((e) => e.type === 'turn_end').length,
+                };
+            }
+            else {
+                (0, trace_1.logTranscript)(events);
+                throw err;
+            }
+        }
+        const budgetLimited = events.some((event) => event.type === 'message_end' && event.message?.customType === 'reviewally_budget');
+        if (budgetLimited) {
+            core.warning('pi investigation budget exhausted — posting a partial review with recorded results.');
+        }
+        return { ...base, toolCalls, timedOut, budgetLimited };
     }
     finally {
         try {
@@ -32350,6 +32739,480 @@ function buildRepoTree(root, inputs, maxEntries = MAX_TREE_ENTRIES) {
         entries.push(`  … (truncated at ${maxEntries} entries)`);
     }
     return entries.join('\n');
+}
+
+
+/***/ }),
+
+/***/ 8501:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MAX_FINDINGS = exports.AGENT_TOOL_NAMES = exports.FINISH_REVIEW_TOOL = exports.SUBMIT_FINDING_TOOL = exports.GET_DIFF_TOOL = void 0;
+exports.buildDiffsPayload = buildDiffsPayload;
+exports.collectAgentToolCalls = collectAgentToolCalls;
+exports.GET_DIFF_TOOL = 'get_diff';
+exports.SUBMIT_FINDING_TOOL = 'submit_finding';
+exports.FINISH_REVIEW_TOOL = 'finish_review';
+exports.AGENT_TOOL_NAMES = [exports.GET_DIFF_TOOL, exports.SUBMIT_FINDING_TOOL, exports.FINISH_REVIEW_TOOL];
+/** Host-side cap mirroring the extension; extra candidates are dropped. */
+exports.MAX_FINDINGS = 25;
+/** Build the diff payload the get_diff tool pages over (written to REVIEWALLY_DIFFS_FILE). */
+function buildDiffsPayload(fetch) {
+    return {
+        truncated: fetch.truncated,
+        totalFiles: fetch.totalFiles,
+        reviewedFiles: fetch.reviewedFiles,
+        files: fetch.files.map((f) => ({
+            path: f.filename,
+            status: f.status,
+            additions: f.additions,
+            deletions: f.deletions,
+            lines: f.lines.map((l) => ({
+                type: l.type,
+                ...(l.oldLine !== undefined ? { oldLine: l.oldLine } : {}),
+                ...(l.newLine !== undefined ? { newLine: l.newLine } : {}),
+                content: l.content,
+            })),
+        })),
+    };
+}
+function asFinding(args) {
+    return {
+        path: typeof args.path === 'string' ? args.path : '',
+        line: typeof args.line === 'number' ? args.line : Number.NaN,
+        title: typeof args.title === 'string' ? args.title : '',
+        severity: ['high', 'medium', 'low'].includes(args.severity)
+            ? args.severity
+            : 'low',
+        impact: typeof args.impact === 'string' ? args.impact : '',
+        evidencePath: typeof args.evidencePath === 'string' ? args.evidencePath : '',
+        evidenceLine: typeof args.evidenceLine === 'number' ? args.evidenceLine : Number.NaN,
+        evidence: typeof args.evidence === 'string' ? args.evidence : '',
+        suggestedFix: typeof args.suggestedFix === 'string' ? args.suggestedFix : '',
+    };
+}
+function asFinish(args) {
+    const limitations = Array.isArray(args.limitations)
+        ? args.limitations.filter((l) => typeof l === 'string' && l.trim().length > 0)
+        : [];
+    const fileSummaries = Array.isArray(args.fileSummaries)
+        ? args.fileSummaries
+            .map((item) => {
+            if (!item || typeof item !== 'object')
+                return null;
+            const f = item;
+            const path = typeof f.path === 'string' ? f.path.trim() : '';
+            const description = typeof f.description === 'string' ? f.description.trim() : '';
+            if (!path || !description)
+                return null;
+            return { path, description };
+        })
+            .filter((x) => x !== null)
+        : [];
+    return {
+        summary: typeof args.summary === 'string' ? args.summary.trim() : '',
+        limitations,
+        fileSummaries,
+    };
+}
+function resultText(value) {
+    if (!value || typeof value !== 'object')
+        return '';
+    const result = value;
+    const content = Array.isArray(result.content) ? result.content : [];
+    const first = content.find((c) => typeof c === 'object' && c !== null && c.type === 'text');
+    return (first?.text ?? '').trim();
+}
+/**
+ * Collect ReviewAlly tool calls from the pi JSONL event stream. A call counts
+ * only when its tool_execution_end arrived without an error; error and
+ * interrupted calls are surfaced separately so an incomplete run can never
+ * look like a clean review.
+ */
+function collectAgentToolCalls(events) {
+    const starts = new Map();
+    const completed = new Map();
+    const ended = new Set();
+    const toolErrors = [];
+    let uncompleted = 0;
+    for (const e of events) {
+        if (e.type === 'tool_execution_start' && typeof e.toolName === 'string') {
+            if (exports.AGENT_TOOL_NAMES.includes(e.toolName) && typeof e.toolCallId === 'string') {
+                starts.set(e.toolCallId, { toolName: e.toolName, args: e.args });
+            }
+        }
+        else if (e.type === 'tool_execution_end' && typeof e.toolName === 'string') {
+            if (!exports.AGENT_TOOL_NAMES.includes(e.toolName) || typeof e.toolCallId !== 'string')
+                continue;
+            const start = starts.get(e.toolCallId);
+            if (!start)
+                continue;
+            ended.add(e.toolCallId);
+            if (e.isError) {
+                toolErrors.push(`${e.toolName}: ${truncate(resultText(e.result), 300) || 'failed'}`);
+            }
+            else if (start.args && typeof start.args === 'object') {
+                completed.set(e.toolCallId, {
+                    toolName: e.toolName,
+                    args: start.args,
+                });
+            }
+        }
+    }
+    for (const id of starts.keys()) {
+        if (!ended.has(id))
+            uncompleted++;
+    }
+    const findings = [];
+    const inspectedPaths = [];
+    let diffCalls = 0;
+    let finish;
+    for (const { toolName, args } of completed.values()) {
+        if (toolName === exports.SUBMIT_FINDING_TOOL && findings.length < exports.MAX_FINDINGS) {
+            findings.push(asFinding(args));
+        }
+        else if (toolName === exports.GET_DIFF_TOOL) {
+            diffCalls++;
+            const p = typeof args.path === 'string' ? args.path.trim() : '';
+            if (p && !inspectedPaths.includes(p))
+                inspectedPaths.push(p);
+        }
+        else if (toolName === exports.FINISH_REVIEW_TOOL) {
+            finish = asFinish(args);
+        }
+    }
+    return {
+        findings,
+        finish,
+        inspectedPaths,
+        diffCalls,
+        toolErrors,
+        uncompletedCalls: uncompleted,
+    };
+}
+function truncate(text, max) {
+    return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+
+/***/ }),
+
+/***/ 3599:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.renderTraceLine = renderTraceLine;
+exports.liveTracer = liveTracer;
+exports.logTranscript = logTranscript;
+exports.writeTranscriptFile = writeTranscriptFile;
+const fs = __importStar(__nccwpck_require__(3024));
+const os = __importStar(__nccwpck_require__(8161));
+const path = __importStar(__nccwpck_require__(6760));
+const core = __importStar(__nccwpck_require__(7484));
+const pi_output_1 = __nccwpck_require__(7269);
+const PREFIX = '[pi]';
+const CAPS = {
+    compact: { args: 300, text: 160, result: 0 },
+    full: { args: 2000, text: 1000, result: 400 },
+};
+function truncate(text, max) {
+    return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+function humanBytes(n) {
+    if (n < 1024)
+        return `${n} B`;
+    if (n < 1024 * 1024)
+        return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+function toolResultSize(result) {
+    try {
+        return JSON.stringify(result ?? '').length;
+    }
+    catch {
+        return 0;
+    }
+}
+function toolResultText(result) {
+    if (!result || typeof result !== 'object')
+        return '';
+    const content = result.content;
+    if (!Array.isArray(content))
+        return '';
+    const first = content.find((c) => typeof c === 'object' && c !== null && c.type === 'text');
+    return (first?.text ?? '').replace(/\r?\n/g, ' ').trim();
+}
+/**
+ * Render one pi JSONL event as a single human-readable trace line, or null
+ * when the event is not worth logging at the given level.
+ */
+function renderTraceLine(event, level = 'compact') {
+    if (level === 'off')
+        return null;
+    const caps = CAPS[level];
+    switch (event.type) {
+        case 'tool_execution_start': {
+            if (typeof event.toolName !== 'string')
+                return null;
+            const args = event.args === undefined ? '' : truncate(JSON.stringify(event.args) ?? '', caps.args);
+            return `${PREFIX} tool_call   ${event.toolName} ${args}`.trimEnd();
+        }
+        case 'tool_execution_end': {
+            if (typeof event.toolName !== 'string')
+                return null;
+            const status = event.isError ? 'ERROR' : 'ok';
+            const size = humanBytes(toolResultSize(event.result));
+            const previewLimit = event.isError ? Math.max(caps.result, caps.text) : caps.result;
+            const preview = previewLimit > 0 ? ` ${truncate(toolResultText(event.result), previewLimit)}` : '';
+            return `${PREFIX} tool_result ${event.toolName} ${status} (${size})${preview}`;
+        }
+        case 'message_end': {
+            const message = event.message;
+            if (message?.customType === 'reviewally_budget') {
+                return `${PREFIX} budget      investigation budget exhausted; wrapping up with reporting tools`;
+            }
+            if (!message || message.role !== 'assistant')
+                return null;
+            if (message.errorMessage) {
+                return `${PREFIX} error       ${truncate(message.errorMessage, caps.text)}`;
+            }
+            const text = (0, pi_output_1.messageText)(message);
+            if (!text)
+                return null;
+            return `${PREFIX} assistant   ${truncate(text.replace(/\r?\n/g, ' '), caps.text)}`;
+        }
+        case 'turn_end': {
+            const usage = event.message?.usage;
+            if (!usage)
+                return null;
+            return `${PREFIX} turn end    tokens in=${usage.input ?? 0} out=${usage.output ?? 0}`;
+        }
+        case 'auto_retry_start':
+            return `${PREFIX} retry       attempt ${event.attempt ?? '?'}: ${truncate(event.errorMessage ?? '', caps.text)}`;
+        case 'compaction_start':
+            return `${PREFIX} compaction  reason=${event.reason ?? '?'}`;
+        case 'agent_end':
+            return `${PREFIX} agent_end`;
+        default:
+            return null;
+    }
+}
+/** Live-trace hook for invokePi: prints one rendered line per parsed event. */
+function liveTracer(level) {
+    return (event) => {
+        const line = renderTraceLine(event, level);
+        if (line)
+            core.info(line);
+    };
+}
+/**
+ * Dump the full raw event stream into a collapsed log group — the complete
+ * record of what the agent did, for post-mortems on failure or timeout.
+ */
+function logTranscript(events) {
+    core.startGroup(`pi transcript (${events.length} event(s))`);
+    for (const event of events) {
+        core.info(truncate(JSON.stringify(event) ?? '', 4000));
+    }
+    core.endGroup();
+}
+/** Write the raw JSONL transcript next to the runner temp dir; returns its path. */
+function writeTranscriptFile(events) {
+    const dir = process.env.RUNNER_TEMP || os.tmpdir();
+    const file = path.join(dir, 'pi-transcript.jsonl');
+    fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n'));
+    return file;
+}
+
+
+/***/ }),
+
+/***/ 8778:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.validateAgentFindings = validateAgentFindings;
+const fs = __importStar(__nccwpck_require__(3024));
+const path = __importStar(__nccwpck_require__(6760));
+const tools_1 = __nccwpck_require__(8501);
+/** Upper size for reading an evidence file; larger files skip the line-range check. */
+const MAX_EVIDENCE_BYTES = 5 * 1024 * 1024;
+const isNonEmptyString = (v) => v.trim().length > 0;
+function isSafeRepoPath(p) {
+    if (!p || path.isAbsolute(p) || p.includes('\\') || p.includes('\0'))
+        return false;
+    const normalized = path.posix.normalize(p.replace(/^\/+/, ''));
+    if (normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) {
+        return false;
+    }
+    return normalized === p && !normalized.startsWith('/');
+}
+function fileLineCount(absPath) {
+    let stat;
+    try {
+        stat = fs.statSync(absPath);
+    }
+    catch {
+        return null;
+    }
+    if (!stat.isFile() || stat.size > MAX_EVIDENCE_BYTES)
+        return null;
+    try {
+        const content = fs.readFileSync(absPath, 'utf-8');
+        if (content.length === 0)
+            return 0;
+        return content.split('\n').length;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Host-side validation of collected tool-call findings against the selected PR
+ * patches and the head snapshot. The extension already checked most of this at
+ * call time; everything is re-checked here because the event stream, not the
+ * tool result, is the source of truth.
+ */
+function validateAgentFindings(toolCalls, files, snapshotRoot) {
+    const valid = [];
+    const rejected = [];
+    const seen = new Set();
+    const byPath = new Map(files.map((f) => [f.filename, f]));
+    const candidates = toolCalls.findings.length > tools_1.MAX_FINDINGS
+        ? toolCalls.findings.slice(0, tools_1.MAX_FINDINGS)
+        : toolCalls.findings;
+    const capped = toolCalls.findings.length > tools_1.MAX_FINDINGS;
+    const reject = (f, reason) => {
+        rejected.push({
+            path: f.path || '(missing path)',
+            line: Number.isInteger(f.line) ? f.line : undefined,
+            title: f.title || '(missing title)',
+            reason,
+        });
+    };
+    for (const f of candidates) {
+        const rejectReason = !isNonEmptyString(f.path) ||
+            !Number.isInteger(f.line) ||
+            f.line < 1 ||
+            !isNonEmptyString(f.title) ||
+            !isNonEmptyString(f.impact) ||
+            !isNonEmptyString(f.evidencePath) ||
+            !Number.isInteger(f.evidenceLine) ||
+            f.evidenceLine < 1 ||
+            !isNonEmptyString(f.evidence) ||
+            !isNonEmptyString(f.suggestedFix)
+            ? 'invalid or missing fields'
+            : null;
+        if (rejectReason) {
+            reject(f, rejectReason);
+            continue;
+        }
+        const file = byPath.get(f.path);
+        if (!file) {
+            reject(f, 'path is not among the files selected for this review');
+            continue;
+        }
+        const anchor = file.lines.some((l) => l.type === 'add' && l.newLine === f.line);
+        if (!anchor) {
+            reject(f, `line ${f.line} is not an added line in the PR patch for ${f.path}`);
+            continue;
+        }
+        const key = `${f.path}:${f.line}`;
+        if (seen.has(key)) {
+            reject(f, 'duplicate location — already recorded');
+            continue;
+        }
+        if (!isSafeRepoPath(f.evidencePath)) {
+            reject(f, `evidence path "${f.evidencePath}" is not a safe repository-relative path`);
+            continue;
+        }
+        const evidenceAbs = path.join(snapshotRoot, f.evidencePath);
+        const lines = fileLineCount(evidenceAbs);
+        if (lines === null) {
+            reject(f, `evidence file "${f.evidencePath}" not found in the head snapshot (or unreadable)`);
+            continue;
+        }
+        if (lines > 0 && f.evidenceLine > lines) {
+            reject(f, `evidence line ${f.evidenceLine} is out of range for ${f.evidencePath} (${lines} lines)`);
+            continue;
+        }
+        seen.add(key);
+        valid.push(f);
+    }
+    return { valid, rejected, capped };
 }
 
 
@@ -32634,17 +33497,19 @@ function asRecommendations(value) {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.annotatePatch = annotatePatch;
-/** Parse a unified-diff patch into annotated lines (context/add/delete with new-line numbers). */
+/** Parse a unified-diff patch into annotated lines (context/add/delete with old and new line numbers). */
 function annotatePatch(patch) {
     const result = [];
     const raw = patch.split('\n');
+    let currentOld = 0;
     let currentNew = 0;
     let inHunk = false;
-    const hunkRe = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+    const hunkRe = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
     for (const line of raw) {
         const hunk = hunkRe.exec(line);
-        if (hunk && hunk[1] !== undefined) {
-            currentNew = Number.parseInt(hunk[1], 10);
+        if (hunk && hunk[1] !== undefined && hunk[2] !== undefined) {
+            currentOld = Number.parseInt(hunk[1], 10);
+            currentNew = Number.parseInt(hunk[2], 10);
             inHunk = true;
             continue;
         }
@@ -32655,14 +33520,16 @@ function annotatePatch(patch) {
             currentNew++;
         }
         else if (line.startsWith('-')) {
-            result.push({ type: 'delete', content: line.slice(1) });
+            result.push({ type: 'delete', oldLine: currentOld, content: line.slice(1) });
+            currentOld++;
         }
         else if (line.startsWith('\\')) {
             continue;
         }
         else {
             const content = line.startsWith(' ') ? line.slice(1) : line;
-            result.push({ type: 'context', newLine: currentNew, content });
+            result.push({ type: 'context', oldLine: currentOld, newLine: currentNew, content });
+            currentOld++;
             currentNew++;
         }
     }
@@ -32721,53 +33588,44 @@ Rules:
 /**
  * Full system prompt for agent mode, built on pi's default agent-harness
  * structure (persona → Available tools → Guidelines → Output) but specialized
- * for PR review.
+ * for PR review. Findings are reported through ReviewAlly tools, so the final
+ * message is brief prose — never a JSON artifact.
  */
 function buildAgentSystemPrompt(inputs) {
-    const persona = `You are an expert coding assistant operating inside pi, a coding agent harness. In this session your task is to review a GitHub pull request: understand the change, investigate the surrounding code with your read-only tools, verify every concern by reading the relevant files, and report a concise, high-level assessment.
+    const persona = `You are an expert coding assistant operating inside pi, a coding agent harness. In this session your task is to review a GitHub pull request: understand the change, investigate the surrounding code, verify every concern against the code and the PR patch, and record the results with the ReviewAlly review tools.
 
-Available tools:
+Repository investigation tools (read-only, operate on the PR head snapshot):
 - read: Read file contents
 - grep: Search file contents for patterns (respects .gitignore)
 - find: Find files by glob pattern (respects .gitignore)
 - ls: List directory contents
 
-You have read-only tools only — you cannot create, edit, or delete files.
+Review tools (ReviewAlly):
+- get_diff: Return one page of a changed file's PR patch with old and new line numbers; page with offset while "more" is true. This is the authoritative view of what this PR changed — added lines carry "+" and the new-file line number.
+- submit_finding: Record one verified defect introduced by this PR, anchored to an ADDED line. Recording does not post anything.
+- finish_review: Complete the review with an overall summary, honest limitations, and per-file change summaries. Call it exactly once, even if there are no findings.
+
+You have read-only tools only — you cannot create, edit, or delete files, and nothing is posted to GitHub until the review finishes and is validated.
 
 Guidelines:
 - Use read to examine files instead of cat or sed.
-- Before raising any issue, verify it by reading the relevant file. Do not report a problem you have not confirmed in the code.
-- Be concise and high-level. Do not restate the diff.
-- Show file paths clearly when referencing files.`;
+- Use get_diff to see the exact base-to-head patch for a changed file before anchoring findings; large diffs may not be embedded in the prompt, but every changed file is fully inspectable with get_diff.
+- Before recording a finding, verify it by reading the relevant file. Do not report a problem you have not confirmed in the code.
+- Only submit findings for defects introduced or exposed by this PR, not pre-existing issues unrelated to the change. Anchor each to an added line of the file it concerns, and cite evidence you actually inspected (evidencePath/evidenceLine must exist in the repository snapshot).
+- Submit each verified finding immediately; do not hold all findings until a final sweep.
+- Prioritize changed runtime behavior and security boundaries. Inspect related tests and documentation when needed to verify a concern, not as an exhaustive second pass.
+- Diffs already embedded in the prompt do not need to be fetched again unless you need exact old-line numbers or more context. Use targeted read ranges and batch independent investigations.
+- The run has a hard time limit of ${Math.ceil(inputs.piTimeoutMs / 1000)} seconds. Reserve the final 30% for reporting. If the harness announces that the investigation budget is exhausted, stop investigating, submit only already-verified findings, and call finish_review immediately with explicit coverage limitations. Never imply unchecked files are sound.
+- Do not pad the review: if nothing meets the bar, submit no findings and say so in finish_review.
+- Be concise. Show file paths clearly when referencing files.`;
     const output = `Output format:
 
-Your FINAL response must be a single JSON object with exactly this schema, wrapped in one fenced json code block — no markdown, code, or text before or after the block:
+Report the review through the tools, not through your final message:
+1. Investigate with read/grep/find/ls and get_diff as needed.
+2. Call submit_finding once per verified defect (or not at all when the change is sound).
+3. Call finish_review exactly once with a 2-4 sentence "summary", any honest "limitations", and optional per-file "fileSummaries" ({ path, description }).
 
-Use exactly this response template:
-
-\`\`\`json
-{
-  "background": "1-3 sentences: what this change addresses and why (your understanding of the PR's intent).",
-  "solution": "1-3 sentences: assessment of the implementation approach taken.",
-  "files": [
-    { "path": "<exact path from the diff>", "description": "concise description of what changed in this file" }
-  ],
-  "recommendations": [
-    { "category": "Security | Edge Case | Performance | Refactoring Tip", "note": "a substantive, actionable, verified suggestion" }
-  ]
-}
-\`\`\`
-
-JSON syntax rules (strict):
-- Use double quotes (") for every key and string value — never single quotes (').
-- No trailing commas and no comments.
-- Escape double quotes inside strings as \\" and use \\n for line breaks; never put a raw line break inside a string.
-
-Rules:
-- "recommendations": ONLY substantive, verified items — real security risks, meaningful edge cases, performance issues, or genuine refactors. Use an empty array if there is nothing substantive.
-- Never mention code-style, missing/extra comments, or trivial restatements of the diff.
-- "files": the key changed files, using exact paths from the diff.
-- Your final response must be valid JSON inside a single fenced json code block — nothing else.`;
+After finish_review, your final message is a brief prose wrap-up (1-2 sentences) for the human — never a JSON object and never a restatement of every finding.`;
     const sections = [persona];
     if (inputs.extraInstructions) {
         sections.push(`Additional review instructions from the project:\n${inputs.extraInstructions}`);
@@ -32775,10 +33633,12 @@ Rules:
     sections.push(output);
     return sections.join('\n\n');
 }
+/** Byte budget for embedded diff excerpts; larger patches remain available via get_diff. */
+const AGENT_DIFF_BUDGET_BYTES = 40_000;
 function buildUserPrompt(pr, files, ctx, isAgent = false) {
     const parts = [];
     if (isAgent) {
-        parts.push('Review the pull request below. Investigate the repository with your tools as needed, verify any concern in the code, then respond with ONLY the JSON review object described in your instructions, wrapped in its json code fence.');
+        parts.push("Review the pull request below. Investigate the repository with your tools as needed, use get_diff to inspect any changed file's patch (prioritize unembedded runtime changes; disclose any uninspected files as limitations), record each verified defect with submit_finding, and complete the review by calling finish_review exactly once. Your final message is a brief prose wrap-up, not JSON.");
         parts.push('');
     }
     parts.push(`# Pull Request #${pr.number}: ${pr.title}`);
@@ -32803,10 +33663,31 @@ function buildUserPrompt(pr, files, ctx, isAgent = false) {
     }
     parts.push('');
     parts.push(`## Changed files (${files.length})`);
-    parts.push('Below are the changed files and their diffs.');
+    if (isAgent) {
+        parts.push('Diff excerpts are embedded below up to a size budget; every changed file is fully inspectable with get_diff.');
+    }
+    else {
+        parts.push('Below are the changed files and their diffs.');
+    }
     parts.push('');
+    const deferred = [];
+    let budget = isAgent ? AGENT_DIFF_BUDGET_BYTES : Number.POSITIVE_INFINITY;
     for (const file of files) {
-        parts.push(renderFile(file));
+        const rendered = renderFile(file);
+        const bytes = Buffer.byteLength(rendered, 'utf8');
+        if (bytes > budget) {
+            deferred.push(file);
+            continue;
+        }
+        parts.push(rendered);
+        parts.push('');
+        budget -= bytes;
+    }
+    if (deferred.length > 0) {
+        parts.push(`### ${deferred.length} file(s) not embedded — inspect with get_diff`);
+        for (const file of deferred) {
+            parts.push(`- ${file.filename}  (+${file.additions} -${file.deletions}, ${file.status})`);
+        }
         parts.push('');
     }
     return parts.join('\n');
@@ -33060,14 +33941,6 @@ module.exports = require("node:os");
 
 "use strict";
 module.exports = require("node:path");
-
-/***/ }),
-
-/***/ 481:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("node:readline");
 
 /***/ }),
 

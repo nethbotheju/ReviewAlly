@@ -5,6 +5,8 @@ import type {
   ConfigKnob,
   ConfigSource,
   ConfigSources,
+  PiLogLevel,
+  PiThinkingLevel,
   RawActionInputs,
   ResolvedConfig,
   ReviewMode,
@@ -152,6 +154,8 @@ export function resolveInputs(raw: RawActionInputs, vars: Map<string, string>): 
     contextDocs: contextDocs.length > 0 ? contextDocs : DEFAULT_CONTEXT_DOCS,
     piVersion: raw.piVersion,
     piTimeoutMs: raw.piTimeoutMs,
+    piLog: (raw.piLog as PiLogLevel | undefined) ?? 'compact',
+    piThinking: (raw.piThinking as PiThinkingLevel | undefined) ?? 'off',
   };
 
   return { inputs, sources };

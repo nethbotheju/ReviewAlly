@@ -22,6 +22,8 @@ function makeInputs(overrides: Partial<ActionInputs> = {}): ActionInputs {
     contextDocs: ['AGENTS.md'],
     piVersion: '0.82.1',
     piTimeoutMs: 600000,
+    piLog: 'compact',
+    piThinking: 'off',
     ...overrides,
   };
 }
@@ -75,19 +77,34 @@ describe('buildAgentSystemPrompt', () => {
     expect(prompt).toContain('read-only tools only');
   });
 
-  it('requires verified findings and JSON-only output', () => {
+  it('lists the ReviewAlly review tools and their contract', () => {
     const prompt = buildAgentSystemPrompt(makeInputs({ reviewMode: 'agent' }));
-    expect(prompt).toContain('verify it by reading the relevant file');
-    expect(prompt).toContain('fenced json code block');
-    expect(prompt).toContain('"background"');
-    expect(prompt).toContain('"recommendations"');
+    expect(prompt).toContain('- get_diff:');
+    expect(prompt).toContain('- submit_finding:');
+    expect(prompt).toContain('- finish_review:');
+    expect(prompt).toContain('anchored to an ADDED line');
+    expect(prompt).toContain('Recording does not post anything');
+    expect(prompt).toContain('exactly once');
   });
 
-  it('specifies strict JSON syntax and a fenced template', () => {
+  it('requires verified findings and a tool-driven workflow, not JSON output', () => {
     const prompt = buildAgentSystemPrompt(makeInputs({ reviewMode: 'agent' }));
-    expect(prompt).toContain('never single quotes');
-    expect(prompt).toContain('```json');
-    expect(prompt).toContain('Use exactly this response template');
+    expect(prompt).toContain('verify it by reading the relevant file');
+    expect(prompt).toContain('introduced or exposed by this PR');
+    // the final message is prose — the JSON contract is gone
+    expect(prompt).not.toContain('fenced json code block');
+    expect(prompt).not.toContain('```json');
+    expect(prompt).not.toContain('never single quotes');
+    expect(prompt).toContain('never a JSON object');
+  });
+
+  it('prioritizes investigation and requires incremental reporting within the time budget', () => {
+    const prompt = buildAgentSystemPrompt(makeInputs({ piTimeoutMs: 120000 }));
+    expect(prompt).toContain('Submit each verified finding immediately');
+    expect(prompt).toContain('120 seconds');
+    expect(prompt).toContain('Reserve the final 30% for reporting');
+    expect(prompt).toContain('stop investigating');
+    expect(prompt).toContain('Never imply unchecked files are sound');
   });
 
   it('omits pi-internal docs/themes/skills guidance irrelevant to a review', () => {
@@ -132,11 +149,13 @@ describe('buildUserPrompt', () => {
     expect(result).toContain('src/index.ts');
   });
 
-  it('prepends the review task directive in agent mode', () => {
+  it('prepends the tool-driven review directive in agent mode', () => {
     const result = buildUserPrompt(mockPr, mockFiles, undefined, true);
     expect(result.startsWith('Review the pull request below')).toBe(true);
-    expect(result).toContain('ONLY the JSON review object');
-    expect(result).toContain('Investigate the repository with your tools');
+    expect(result).toContain('get_diff');
+    expect(result).toContain('submit_finding');
+    expect(result).toContain('finish_review');
+    expect(result).toContain('not JSON');
   });
 
   it('omits the tool directive in standard mode', () => {
@@ -151,6 +170,81 @@ describe('buildUserPrompt', () => {
     expect(result).toContain('-');
     expect(result).toContain('// old code');
     expect(result).toContain('// new feature');
+  });
+
+  it('agent mode defers files over the diff budget to get_diff and stays small', () => {
+    const bigLine = (n: number) => ({
+      type: 'add' as const,
+      newLine: n,
+      content: 'x'.repeat(120),
+    });
+    const bigFile = (name: string): ChangedFile => ({
+      filename: name,
+      status: 'modified',
+      additions: 500,
+      deletions: 0,
+      lines: Array.from({ length: 500 }, (_, i) => bigLine(i + 1)),
+    });
+    const files = [...mockFiles, bigFile('big-b.ts'), bigFile('big-c.ts')];
+    const result = buildUserPrompt(mockPr, files, undefined, true);
+    // the small file's diff is still embedded…
+    expect(result).toContain('```diff');
+    expect(result).toContain('// new feature');
+    // …while the oversized ones are listed for get_diff
+    expect(result).toContain('file(s) not embedded — inspect with get_diff');
+    expect(result).toContain('- big-b.ts  (+500 -0, modified)');
+    expect(result).toContain('- big-c.ts  (+500 -0, modified)');
+    // the whole prompt stays far below the ~128KB single-argument OS limit
+    expect(Buffer.byteLength(result, 'utf8')).toBeLessThan(100_000);
+  });
+
+  it('agent mode still defers a single oversized first file instead of embedding it', () => {
+    const huge: ChangedFile = {
+      filename: 'huge.ts',
+      status: 'modified',
+      additions: 5000,
+      deletions: 0,
+      lines: Array.from({ length: 5000 }, (_, i) => ({
+        type: 'add',
+        newLine: i + 1,
+        content: 'x'.repeat(120),
+      })),
+    };
+    const result = buildUserPrompt(mockPr, [huge], undefined, true);
+    expect(result).not.toContain('```diff');
+    expect(result).toContain('file(s) not embedded — inspect with get_diff');
+    expect(result).toContain('- huge.ts  (+5000 -0, modified)');
+  });
+
+  it('budgets UTF-8 bytes rather than characters for embedded agent diffs', () => {
+    const unicodeFile: ChangedFile = {
+      filename: 'unicode.ts',
+      status: 'added',
+      additions: 1,
+      deletions: 0,
+      lines: [{ type: 'add', newLine: 1, content: '😀'.repeat(15000) }],
+    };
+    const result = buildUserPrompt(mockPr, [unicodeFile], undefined, true);
+    expect(result).not.toContain('```diff');
+    expect(result).toContain('- unicode.ts');
+    expect(Buffer.byteLength(result, 'utf8')).toBeLessThan(40000);
+  });
+
+  it('standard mode embeds every diff regardless of size (API message, not argv)', () => {
+    const huge: ChangedFile = {
+      filename: 'huge.ts',
+      status: 'modified',
+      additions: 5000,
+      deletions: 0,
+      lines: Array.from({ length: 5000 }, (_, i) => ({
+        type: 'add',
+        newLine: i + 1,
+        content: 'x'.repeat(120),
+      })),
+    };
+    const result = buildUserPrompt(mockPr, [huge]);
+    expect(result).toContain('```diff');
+    expect(result).not.toContain('not embedded');
   });
 
   it('includes repository tree when provided', () => {

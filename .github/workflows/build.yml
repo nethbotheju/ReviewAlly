@@ -30,3 +30,20 @@ jobs:
             git status --porcelain dist
             exit 1
           fi
+
+  pi-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pi-version: ['0.82.1', '1.0.0']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm install --prefix "$RUNNER_TEMP/pi-smoke" --ignore-scripts --no-audit --no-fund "@earendil-works/pi-coding-agent@${{ matrix.pi-version }}"
+      - run: npx vitest run src/modes/agent/pi-integration.test.ts
+        env:
+          REVIEWALLY_TEST_PI_CLI: ${{ runner.temp }}/pi-smoke/node_modules/@earendil-works/pi-coding-agent/dist/cli.js

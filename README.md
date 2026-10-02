@@ -106,7 +106,17 @@ One focused pass: the PR diff plus repository context (`AGENTS.md`, `CONTRIBUTIN
 
 ### Agent
 
-For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head and runs the [pi coding agent](https://github.com/earendil-works/pi) as the review harness. The model investigates with read-only tools (`read`, `grep`, `find`, `ls`) before writing a recommendation, and large repositories automatically fall back to standard mode.
+For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head and runs the [pi coding agent](https://github.com/earendil-works/pi) as the review harness. The model investigates with read-only tools (`read`, `grep`, `find`, `ls`) plus three ReviewAlly review tools:
+
+- **`get_diff`** — page through any changed file's PR patch with old/new line numbers, so findings anchor to lines the PR actually added.
+- **`submit_finding`** — record a verified defect (severity, impact, source evidence, suggested fix) anchored to an added line. Recording posts nothing yet.
+- **`finish_review`** — complete the review with an overall summary, honest limitations, and per-file change summaries.
+
+After the run, ReviewAlly re-validates every candidate against the PR patches and the head snapshot, checks that the PR head has not moved, and posts one review: a status line, a collapsed **Review walkthrough** (changed-file table, diff-inspection coverage, assessment, limitations, reviewed head SHA), and one **inline, replyable GitHub review comment per validated finding**. Rejected candidates and incomplete coverage are shown in the walkthrough — a review that did not finish cleanly is posted as a partial review, never as a clean one. Large repositories automatically fall back to standard mode.
+
+Agent runs reserve the final 30% of `pi-timeout-ms` for reporting: investigation tools are disabled, thinking is lowered to `low`, and the agent is asked to submit already-verified findings and call `finish_review`. These budget-limited runs are explicitly **partial**, even if a summary is recorded. Findings are recorded incrementally, so a hard timeout can still retain verified results.
+
+Pi may download the `rg`/`fd` binaries needed by `grep`/`find`; offline mode is intentionally disabled. Tool errors include their message even in compact logs. The raw transcript is saved under `RUNNER_TEMP`; the dogfood workflow uploads it as the `pi-transcript` artifact for debugging.
 
 ## Inputs
 
@@ -122,12 +132,14 @@ For deeper changes, ReviewAlly takes a snapshot of the repository at the PR head
 | `trigger-label` | no | `reviewally` | Label that triggers a review |
 | `auto-review` | no | `false` | Also review on PR open/reopen/push |
 | `review-mode` | no | `standard` | `standard` (single prompt) or `agent` (investigation loop) |
-| `max-files` | no | `20` | Max changed files reviewed per run |
-| `max-diff-lines` | no | `3000` | Max total added lines reviewed per run |
+| `max-files` | no | `20` | Max changed files reviewed per run (standard mode; agent reviews all) |
+| `max-diff-lines` | no | `3000` | Max total added lines reviewed per run (standard mode only) |
 | `use-default-excludes` | no | `true` | Built-in excludes for lockfiles, minified files, sourcemaps |
 | `agent-tarball-max-mb` | no | `200` | Max repo snapshot size before degrading to standard mode |
-| `pi-version` | no | `0.82.1` | Agent runtime version |
+| `pi-version` | no | `1.0.0` | Pinned agent runtime version (Node 24 action runtime) |
 | `pi-timeout-ms` | no | `600000` | Hard timeout for an agent-mode review |
+| `pi-log` | no | `compact` | Agent-run visibility in the Actions log: `off`, `compact`, or `full` |
+| `pi-thinking` | no | `off` | Thinking level for agent mode — prefer `low` for reasoning models; `high` can exhaust the time budget |
 
 ¹ Or the matching `REVIEWALLY_*` repository variable — see below.
 
@@ -152,7 +164,7 @@ Switching providers is a pure UI operation: update the API-key secret value, the
 
 ## Outputs
 
-Every review covers the issue and background, the proposed solution, a summary of file changes, and prioritized recommendations. Recommendations are prioritized by impact, focusing on security, edge cases, performance, and design decisions.
+Standard-mode reviews cover the issue and background, the proposed solution, a summary of file changes, and prioritized recommendations. Agent-mode reviews post a walkthrough plus inline findings attached to the changed lines that introduced them — open a thread or reply to discuss any finding.
 
 ## Security and privacy
 

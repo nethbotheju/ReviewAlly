@@ -47,28 +47,18 @@ export async function fetchChangedFiles(
     return true;
   });
 
-  const selected: typeof all = [];
-  let addedLines = 0;
-  let truncated = false;
-  let truncatedReason: string | undefined;
+  // Agent mode reads diffs on demand via the get_diff tool (never the
+  // prompt), so every candidate file stays inspectable. Standard mode embeds
+  // the diff in the prompt and keeps the size budget.
+  const budgeted =
+    inputs.reviewMode === 'agent'
+      ? { files: candidates, truncated: false, truncatedReason: undefined as string | undefined }
+      : applyDiffBudget(candidates, {
+          maxFiles: inputs.maxFiles,
+          maxDiffLines: inputs.maxDiffLines,
+        });
 
-  for (const file of candidates) {
-    if (selected.length >= inputs.maxFiles) {
-      truncated = true;
-      truncatedReason = `Reached max-files limit (${inputs.maxFiles})`;
-      break;
-    }
-    const nextTotal = addedLines + file.additions;
-    if (nextTotal > inputs.maxDiffLines && selected.length > 0) {
-      truncated = true;
-      truncatedReason = `Reached max-diff-lines limit (${inputs.maxDiffLines})`;
-      break;
-    }
-    addedLines = nextTotal;
-    selected.push(file);
-  }
-
-  const files: ChangedFile[] = selected.map((f) => ({
+  const files: ChangedFile[] = budgeted.files.map((f) => ({
     filename: f.filename,
     status: f.status,
     additions: f.additions,
@@ -84,9 +74,47 @@ export async function fetchChangedFiles(
     files,
     totalFiles: all.length,
     reviewedFiles: files.length,
-    truncated,
-    truncatedReason,
+    truncated: budgeted.truncated,
+    truncatedReason: budgeted.truncatedReason,
   };
+}
+
+export interface DiffBudget {
+  maxFiles: number;
+  maxDiffLines: number;
+}
+
+/**
+ * Apply the standard-mode selection budget: stop before the file that would
+ * exceed either cap. A single oversized first file is still included so the
+ * review never ends up empty.
+ */
+export function applyDiffBudget<T extends { additions: number }>(
+  items: T[],
+  budget: DiffBudget,
+): { files: T[]; truncated: boolean; truncatedReason?: string } {
+  const files: T[] = [];
+  let addedLines = 0;
+  for (const item of items) {
+    if (files.length >= budget.maxFiles) {
+      return {
+        files,
+        truncated: true,
+        truncatedReason: `Reached max-files limit (${budget.maxFiles})`,
+      };
+    }
+    const nextTotal = addedLines + item.additions;
+    if (nextTotal > budget.maxDiffLines && files.length > 0) {
+      return {
+        files,
+        truncated: true,
+        truncatedReason: `Reached max-diff-lines limit (${budget.maxDiffLines})`,
+      };
+    }
+    addedLines = nextTotal;
+    files.push(item);
+  }
+  return { files, truncated: false };
 }
 
 // --- File contents ---

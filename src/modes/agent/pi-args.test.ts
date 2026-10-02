@@ -27,12 +27,15 @@ function makeInputs(overrides: Partial<ActionInputs> = {}): ActionInputs {
     contextDocs: ['AGENTS.md'],
     piVersion: '0.82.1',
     piTimeoutMs: 600000,
+    piLog: 'compact',
+    piThinking: 'off',
     ...overrides,
   };
 }
 
 const SYSTEM = 'SYSTEM';
 const USER = 'USER';
+const EXTENSION = '/tmp/cfg/reviewally-tools.js';
 
 describe('providerFor', () => {
   it('maps native api types to their pi provider ids', () => {
@@ -78,6 +81,38 @@ describe('buildModelsJson', () => {
     expect(compat?.supportsReasoningEffort).toBe(false);
   });
 
+  it('declares reasoning levels and sends reasoning_effort when a thinking level is set', () => {
+    const json = buildModelsJson(
+      makeInputs({
+        apiType: 'openai-chat-compatible',
+        baseUrl: 'https://x/v1',
+        piThinking: 'low',
+      }),
+    ) as {
+      providers: Record<
+        string,
+        {
+          compat: Record<string, unknown>;
+          models: Array<{
+            id: string;
+            reasoning?: boolean;
+            thinkingLevelMap?: Record<string, string | null>;
+          }>;
+        }
+      >;
+    };
+    const provider = json.providers[PI_CUSTOM_PROVIDER];
+    expect(provider?.compat.supportsReasoningEffort).toBe(true);
+    const model = provider?.models[0];
+    expect(model?.reasoning).toBe(true);
+    expect(model?.thinkingLevelMap).toMatchObject({
+      off: null,
+      low: 'low',
+      high: 'high',
+      max: 'high',
+    });
+  });
+
   it('throws for non-compatible api types', () => {
     expect(() => buildModelsJson(makeInputs({ apiType: 'anthropic' }))).toThrow();
   });
@@ -85,19 +120,38 @@ describe('buildModelsJson', () => {
 
 describe('buildPiArgs', () => {
   it('always uses headless, ephemeral, read-only settings', () => {
-    const args = buildPiArgs(SYSTEM, USER, makeInputs());
+    const args = buildPiArgs(SYSTEM, USER, makeInputs(), EXTENSION);
     expect(args).toContain('-p');
     expect(args).toContain('--no-session');
     expect(args[args.indexOf('--mode') + 1]).toBe('json');
-    expect(args).toContain('--offline');
+    expect(args).not.toContain('--offline');
     expect(args[args.indexOf('--thinking') + 1]).toBe('off');
-    expect(args[args.indexOf('--tools') + 1]).toBe('read,grep,find,ls');
+    const leveled = buildPiArgs(SYSTEM, USER, makeInputs({ piThinking: 'low' }), EXTENSION);
+    expect(leveled[leveled.indexOf('--thinking') + 1]).toBe('low');
+    expect(args[args.indexOf('--tools') + 1]).toBe(
+      'read,grep,find,ls,get_diff,submit_finding,finish_review',
+    );
     // read-only: never expose destructive tools
-    expect(args.join(' ')).not.toMatch(/\bbash\b|\bedit\b|\bwrite\b/);
+    expect(args.join(' ').replace(/get_diff,submit_finding,finish_review/, '')).not.toMatch(
+      /\bbash\b|\bedit\b|\bwrite\b/,
+    );
+  });
+
+  it('loads the ReviewAlly tools extension explicitly, before the system prompt', () => {
+    const args = buildPiArgs(SYSTEM, USER, makeInputs(), EXTENSION);
+    expect(args[args.indexOf('--extension') + 1]).toBe(EXTENSION);
+    expect(args.indexOf('--extension')).toBeLessThan(args.indexOf('--system-prompt'));
+    // explicit --extension paths load even under --no-extensions
+    expect(args).toContain('--no-extensions');
   });
 
   it('passes provider + model + prompts', () => {
-    const args = buildPiArgs(SYSTEM, USER, makeInputs({ apiType: 'anthropic', model: 'claude-x' }));
+    const args = buildPiArgs(
+      SYSTEM,
+      USER,
+      makeInputs({ apiType: 'anthropic', model: 'claude-x' }),
+      EXTENSION,
+    );
     expect(args[args.indexOf('--provider') + 1]).toBe('anthropic');
     expect(args[args.indexOf('--model') + 1]).toBe('claude-x');
     expect(args[args.indexOf('--system-prompt') + 1]).toBe(SYSTEM);
@@ -109,6 +163,7 @@ describe('buildPiArgs', () => {
       SYSTEM,
       USER,
       makeInputs({ apiType: 'openai-chat-compatible', baseUrl: 'https://x/v1' }),
+      EXTENSION,
     );
     expect(args[args.indexOf('--provider') + 1]).toBe(PI_CUSTOM_PROVIDER);
   });
@@ -119,6 +174,19 @@ describe('buildPiEnv', () => {
     const env = buildPiEnv(makeInputs({ apiType: 'anthropic', apiKey: 'sk-secret' }), '/tmp/cfg');
     expect(env.ANTHROPIC_API_KEY).toBe('sk-secret');
     expect(env.PI_CODING_AGENT_DIR).toBe('/tmp/cfg');
+    expect(env.PI_OFFLINE).toBe('0');
+    expect(env.REVIEWALLY_TIMEOUT_MS).toBe('600000');
+    expect(env.REVIEWALLY_DIFFS_FILE).toBeUndefined();
+  });
+
+  it('points the ReviewAlly extension at the diffs file when provided', () => {
+    const env = buildPiEnv(
+      makeInputs({ apiType: 'anthropic', apiKey: 'sk-secret' }),
+      '/tmp/cfg',
+      '/tmp/cfg/diffs.json',
+    );
+    expect(env.REVIEWALLY_DIFFS_FILE).toBe('/tmp/cfg/diffs.json');
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-secret');
   });
 
   it('uses OPENAI_API_KEY for openai', () => {

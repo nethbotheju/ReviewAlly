@@ -1,9 +1,19 @@
 import * as core from '@actions/core';
-import type { RawActionInputs } from './types';
+import type { PiLogLevel, PiThinkingLevel, RawActionInputs } from './types';
 
-const DEFAULT_PI_VERSION = '0.82.1';
+const DEFAULT_PI_VERSION = '1.0.0';
 // Injection-safe version spec (semver, prerelease, dist-tag). No spaces/shell metachars.
 const VERSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+\-]*$/;
+const PI_LOG_LEVELS: readonly PiLogLevel[] = ['off', 'compact', 'full'];
+const PI_THINKING_LEVELS: readonly PiThinkingLevel[] = [
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 
 function parseIntInput(name: string, fallback: number): number {
   const raw = core.getInput(name).trim();
@@ -18,6 +28,28 @@ function parseIntInput(name: string, fallback: number): number {
 function optionalInput(name: string): string | undefined {
   const raw = core.getInput(name).trim();
   return raw === '' ? undefined : raw;
+}
+
+function parsePiLogLevel(): PiLogLevel {
+  const raw = optionalInput('pi-log')?.toLowerCase();
+  if (raw === undefined) return 'compact';
+  const level = PI_LOG_LEVELS.find((l) => l === raw);
+  if (!level) {
+    throw new Error(`Invalid pi-log '${raw}'. Must be one of: off, compact, full.`);
+  }
+  return level;
+}
+
+function parsePiThinking(): PiThinkingLevel {
+  const raw = optionalInput('pi-thinking')?.toLowerCase();
+  if (raw === undefined) return 'off';
+  const level = PI_THINKING_LEVELS.find((l) => l === raw);
+  if (!level) {
+    throw new Error(
+      `Invalid pi-thinking '${raw}'. Must be one of: off, minimal, low, medium, high, xhigh, max.`,
+    );
+  }
+  return level;
 }
 
 export function getRawInputs(): RawActionInputs {
@@ -44,7 +76,7 @@ export function getRawInputs(): RawActionInputs {
   const piVersion = optionalInput('pi-version') ?? DEFAULT_PI_VERSION;
   if (!VERSION_PATTERN.test(piVersion)) {
     throw new Error(
-      `Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 0.82.1, latest).`,
+      `Invalid pi-version '${piVersion}'. Must be a plain version or dist-tag (e.g. 1.0.0, latest).`,
     );
   }
 
@@ -65,5 +97,7 @@ export function getRawInputs(): RawActionInputs {
     agentTarballMaxMb: parseIntInput('agent-tarball-max-mb', 200),
     piVersion,
     piTimeoutMs: parseIntInput('pi-timeout-ms', 600000),
+    piLog: parsePiLogLevel(),
+    piThinking: parsePiThinking(),
   };
 }
