@@ -34,16 +34,29 @@ export default {
       return reply(400, { error: 'invalid repo; expected "owner/name"' });
     }
 
-    // Only workflow GITHUB_TOKENs (server-to-server ghs_) may mint.
-    if (!/^ghs_/.test(workflowToken)) {
-      return reply(401, { error: 'app tokens can only be minted with a workflow GITHUB_TOKEN' });
+    // Workflow GITHUB_TOKENs (server-to-server ghs_) and user tokens (gho_,
+    // ghp_, github_pat_) may mint; user tokens additionally require push
+    // access to the repo.
+    const isWorkflowToken = /^ghs_/.test(workflowToken);
+    const isUserToken = /^(gho_|ghp_|github_pat_)/.test(workflowToken);
+    if (!isWorkflowToken && !isUserToken) {
+      return reply(401, { error: 'only workflow GITHUB_TOKENs or user tokens may mint' });
     }
 
-    // Validate the caller's workflow token can actually access this repo.
+    // Validate the caller's token can actually access this repo.
     const check = await gh(`/repos/${repo}`, `Bearer ${workflowToken}`);
     if (check.status !== 200) {
       console.error(`repo validation failed with ${check.status}`);
       return reply(401, { error: 'token is not valid for this repo' });
+    }
+
+    // Anyone can hold a user token; require collaborator-level write access
+    // before minting on their behalf.
+    if (isUserToken) {
+      const perms = ((await check.json().catch(() => null)) || {}).permissions || {};
+      if (perms.push !== true) {
+        return reply(401, { error: 'user token does not have push access to this repo' });
+      }
     }
 
     // Count only validated callers.
